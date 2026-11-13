@@ -1,0 +1,5 @@
+# Pinned to the Rust stable release verified on 2026-11-13.
+# Rust has no LTS track, so this follows latest stable.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
