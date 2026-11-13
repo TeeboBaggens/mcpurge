@@ -203,7 +203,7 @@ Critical fixes that ship without an advisory are caught separately by a daily
 ## Development
 
 ```sh
-cargo test --all                              # 78 tests
+cargo test --all                              # 87 tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo deny check advisories licenses bans sources
@@ -213,7 +213,8 @@ The engine is independent of the GUI — `model`, `registry`, `scan`, `proc`,
 `files` and `purge` have no egui dependency, which is what lets `--list` and
 `--json` work headlessly and keeps the parsing and editing logic unit-testable.
 
-Tests of note: the config rewriter is checked for comment preservation,
+Tests of note: the UI is rendered headlessly for every tab and dialog, so a
+layout or id-collision panic fails the build; the config rewriter is checked for comment preservation,
 dangling commas, deeply nested pointers and byte-identical sibling tokens; the
 process matcher is checked against the real `npx` → `npm exec` wrapper chain;
 and there are named regression tests for both bugs that the first real scan

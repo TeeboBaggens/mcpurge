@@ -307,6 +307,7 @@ pub struct Totals {
     pub running: usize,
     pub clients: usize,
     pub orphans: usize,
+    /// Bytes that could actually be reclaimed, counting each path once.
     pub bytes: u64,
 }
 
@@ -316,16 +317,23 @@ pub fn totals(result: &ScanResult) -> Totals {
         .iter()
         .map(|f| f.entry.client_id.as_str())
         .collect();
+
+    // De-duplicate by path. One npx cache directory commonly backs the same
+    // server registered in a dozen different agent configs, and summing per
+    // finding would report a dozen times the space that deleting it frees.
+    let mut unique: BTreeMap<&std::path::Path, u64> = BTreeMap::new();
+    for f in &result.findings {
+        for a in f.deletable_artifacts() {
+            unique.insert(a.path.as_path(), a.size_bytes);
+        }
+    }
+
     Totals {
         servers: result.findings.len(),
         running: result.findings.iter().filter(|f| f.is_running()).count(),
         clients: clients.len(),
         orphans: result.orphans.len(),
-        bytes: result
-            .findings
-            .iter()
-            .map(|f| f.deletable_artifacts().map(|a| a.size_bytes).sum::<u64>())
-            .sum(),
+        bytes: unique.values().sum(),
     }
 }
 
@@ -517,6 +525,58 @@ mod tests {
         assert_eq!(planted.entry.scope, Scope::Project(proj.clone()));
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn reclaimable_bytes_count_each_path_once() {
+        // Regression: the headline figure summed artifacts per finding, so one
+        // npx cache shared by 42 server entries was reported 42 times over
+        // (223 MB became "1.0 GB reclaimable").
+        use crate::model::{
+            Artifact, ArtifactKind, ConfigFormat, Finding, ServerEntry, SourceLocation, Transport,
+        };
+
+        let shared_cache = Artifact {
+            path: PathBuf::from("/tmp/mcpurge-test/_npx/abc"),
+            size_bytes: 100,
+            kind: ArtifactKind::NpmCache,
+            shared: false,
+            note: String::new(),
+        };
+        let make = |name: &str| Finding {
+            entry: ServerEntry {
+                name: name.to_string(),
+                client_id: "a".into(),
+                client_name: "A".into(),
+                scope: Scope::User,
+                transport: Transport::Stdio {
+                    command: "npx".into(),
+                    args: vec![],
+                },
+                env: Default::default(),
+                disabled: false,
+                source: SourceLocation {
+                    path: PathBuf::from(format!("/tmp/{name}.json")),
+                    container_pointer: "/mcpServers".into(),
+                    container_key: "mcpServers".into(),
+                    format: ConfigFormat::Json,
+                },
+                raw: serde_json::Value::Null,
+            },
+            procs: vec![],
+            artifacts: vec![shared_cache.clone()],
+        };
+
+        let result = ScanResult {
+            findings: vec![make("one"), make("two"), make("three")],
+            ..Default::default()
+        };
+        let t = totals(&result);
+        assert_eq!(t.servers, 3);
+        assert_eq!(
+            t.bytes, 100,
+            "three entries sharing one 100-byte cache reclaim 100 bytes, not 300"
+        );
     }
 
     #[test]
