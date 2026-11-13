@@ -1,0 +1,40 @@
+# cargo-deny policy. The `advisories` check is mcpurge's net for critical bug
+# fixes and vulnerabilities that Dependabot's semver filter would skip: it runs
+# on every PR and on a daily schedule in CI against the RustSec database.
+#
+# Verified against cargo-deny 0.20.2 on 2026-11-13.
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Any unmaintained or yanked dependency is a release blocker, not a warning.
+yanked = "deny"
+unmaintained = "all"
+ignore = []
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "BSL-1.0",
+    # Fonts egui bundles for its default text rendering. Both are free,
+    # redistributable font licences; they cover font files only, not code.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,0 +1,55 @@
+[package]
+name = "mcpurge"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Find, inspect, stop and purge MCP servers across every AI agent on this machine"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/TeeboBaggens/mcpurge"
+default-run = "mcpurge"
+
+# All versions below are the latest stable releases, verified against the
+# crates.io API on 2026-11-13. None of these crates publish an LTS track.
+[dependencies]
+# GUI. eframe is egui's native/web shell; egui_extras supplies the table widget.
+eframe = { version = "0.37.0", default-features = false, features = [
+    "default_fonts",
+    "glow",      # OpenGL backend: widest driver support across the 3 targets
+    "persistence",
+    "wayland",
+    "x11",
+] }
+egui = "0.37.0"
+egui_extras = "0.37.0"
+
+# Config parsing. serde_json uses preserve_order so rewritten files keep their
+# original key order; jsonc-parser gives byte spans so we can splice a server
+# out of a commented JSONC file without destroying the comments.
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+jsonc-parser = { version = "0.34.0", features = ["serde"] }
+toml = "1.2.1"
+# Format-preserving TOML editing, so removing a server from Codex's
+# config.toml leaves surrounding comments and layout untouched.
+toml_edit = "0.25.19"
+serde_norway = "0.9.42" # maintained serde_yaml fork; upstream is archived
+
+# Process inspection and signalling.
+sysinfo = "0.40.3"
+
+# Filesystem, paths, time, trash.
+dirs = "7.0.0"
+walkdir = "2.5.0"
+glob = "0.3.4"      # expands registry path patterns like globalStorage/*/settings/*.json
+trash = "5.3.0"
+jiff = "0.2.43"
+open = "5.4.5"
+
+# Errors.
+anyhow = "1.0.104"
+thiserror = "2.0.21"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true

@@ -1,0 +1,465 @@
+# mcpurge client registry
+#
+# These entries are HINTS, not gospel. Published MCP config paths conflict
+# between sources and drift between releases - Cline's own docs disagree with
+# its code, Claude Desktop moved its servers out of claude_desktop_config.json,
+# and Cherry Studio keeps them in Redux state with no file at all. So this file
+# only tells the scanner where to look first; anything it misses is still
+# caught by the content-based sweep in src/scan/discover.rs, which identifies a
+# config by its SHAPE rather than its filename.
+#
+# A user copy at <config>/mcpurge/clients.toml replaces this list entirely,
+# so you can add a tool without rebuilding.
+#
+# confidence:
+#   verified - confirmed against the vendor's own docs or seen on a real machine
+#   reported - consistent across secondary sources, not vendor-confirmed
+#   guess    - plausible, unconfirmed; present so the scanner probes the path
+#
+# Path placeholders, expanded per OS:
+#   ~             home directory
+#   $CONFIG       macOS ~/Library/Application Support | Linux ~/.config | Windows %APPDATA%
+#   $CONFIG_LOCAL macOS/Linux as above | Windows %LOCALAPPDATA%
+#   $DATA         macOS ~/Library/Application Support | Linux ~/.local/share | Windows %APPDATA%
+#   $XDG_CONFIG   ~/.config on every OS (many CLI tools use it even on macOS)
+# `*` and `**` glob as usual. paths_macos/_windows/_linux add OS-specific entries.
+
+# ---------------------------------------------------------------- Anthropic ---
+
+[[client]]
+id = "claude-code"
+name = "Claude Code"
+kind = "cli"
+confidence = "verified"
+container_keys = ["mcpServers"]
+paths = ["~/.claude.json", "~/.claude/settings.json", "~/.claude/settings.local.json"]
+project_paths = [".mcp.json", ".claude/settings.json", ".claude/settings.local.json"]
+process_hints = ["claude"]
+# ~/.claude.json nests per-project servers under projects.<abs path>.mcpServers.
+# The parser walks the whole document, so those are found without special cases
+# - and their absolute keys are what we harvest as project roots to scan.
+notes = "Three scopes: user (~/.claude.json), project (.mcp.json), local."
+harvest_project_keys = ["projects"]
+
+[[client]]
+id = "claude-desktop"
+name = "Claude Desktop"
+kind = "desktop"
+confidence = "verified"
+container_keys = ["mcpServers"]
+paths_macos = [
+    "~/Library/Application Support/Claude/claude_desktop_config.json",
+    "~/Library/Application Support/Claude/Claude Extensions/**/manifest.json",
+]
+paths_windows = [
+    "$CONFIG/Claude/claude_desktop_config.json",
+    "$CONFIG/Claude/Claude Extensions/**/manifest.json",
+]
+paths_linux = ["$XDG_CONFIG/Claude/claude_desktop_config.json"]
+process_hints = ["Claude Helper", "Claude"]
+notes = "Recent builds moved MCP out of claude_desktop_config.json into installed extensions (.mcpb bundles), so that file may legitimately hold no servers."
+
+# ------------------------------------------------------------------- Editors ---
+
+[[client]]
+id = "cursor"
+name = "Cursor"
+kind = "ide"
+confidence = "verified"
+container_keys = ["mcpServers"]
+paths = ["~/.cursor/mcp.json"]
+project_paths = [".cursor/mcp.json"]
+process_hints = ["Cursor"]
+
+[[client]]
+id = "windsurf"
+name = "Windsurf"
+kind = "ide"
+confidence = "verified"
+container_keys = ["mcpServers"]
+paths = ["~/.codeium/windsurf/mcp_config.json", "~/.codeium/windsurf-next/mcp_config.json"]
+project_paths = [".windsurf/mcp.json"]
+process_hints = ["Windsurf"]
+notes = "Uses serverUrl (not url) for remote servers."
+
+[[client]]
+id = "devin-desktop"
+name = "Devin Desktop"
+kind = "desktop"
+confidence = "reported"
+container_keys = ["mcpServers"]
+paths = ["$XDG_CONFIG/devin/mcp_config.json"]
+paths_windows = ["$CONFIG/devin/mcp_config.json"]
+process_hints = ["Devin"]
+notes = "Windsurf's successor branding; sources disagree on which path is current, so both are probed."
+
+[[client]]
+id = "vscode"
+name = "VS Code (Copilot)"
+kind = "ide"
+confidence = "verified"
+# VS Code uses `servers`, not `mcpServers`. It also reads a portable .mcp.json.
+container_keys = ["servers", "mcpServers"]
+paths_macos = [
+    "~/Library/Application Support/Code/User/mcp.json",
+    "~/Library/Application Support/Code/User/settings.json",
+    "~/Library/Application Support/Code/User/profiles/*/mcp.json",
+]
+paths_linux = ["$XDG_CONFIG/Code/User/mcp.json", "$XDG_CONFIG/Code/User/settings.json", "$XDG_CONFIG/Code/User/profiles/*/mcp.json"]
+paths_windows = ["$CONFIG/Code/User/mcp.json", "$CONFIG/Code/User/settings.json", "$CONFIG/Code/User/profiles/*/mcp.json"]
+project_paths = [".vscode/mcp.json", ".mcp.json"]
+process_hints = ["Code Helper", "Code"]
+notes = "Config files routinely contain comments; edits go through the JSONC splicer to preserve them."
+
+[[client]]
+id = "vscode-insiders"
+name = "VS Code Insiders"
+kind = "ide"
+confidence = "reported"
+container_keys = ["servers", "mcpServers"]
+paths_macos = [
+    "~/Library/Application Support/Code - Insiders/User/mcp.json",
+    "~/Library/Application Support/Code - Insiders/User/settings.json",
+]
+paths_linux = ["$XDG_CONFIG/Code - Insiders/User/mcp.json", "$XDG_CONFIG/Code - Insiders/User/settings.json"]
+paths_windows = ["$CONFIG/Code - Insiders/User/mcp.json", "$CONFIG/Code - Insiders/User/settings.json"]
+project_paths = [".vscode-insiders/mcp.json"]
+process_hints = ["Code - Insiders"]
+
+[[client]]
+id = "visual-studio"
+name = "Visual Studio"
+kind = "ide"
+confidence = "reported"
+container_keys = ["servers"]
+paths_windows = ["~/.mcp.json"]
+project_paths = [".mcp.json"]
+process_hints = ["devenv"]
+notes = "Windows only. Same `servers` schema as VS Code, solution-level .mcp.json."
+
+[[client]]
+id = "zed"
+name = "Zed"
+kind = "ide"
+confidence = "verified"
+# Zed's key is context_servers, and it supports stdio only.
+container_keys = ["context_servers"]
+paths = ["$XDG_CONFIG/zed/settings.json"]
+paths_windows = ["$CONFIG/Zed/settings.json"]
+project_paths = [".zed/settings.json"]
+process_hints = ["zed", "Zed"]
+notes = "stdio only; older releases used assistant.mcp_servers, which the tree walk still finds."
+
+[[client]]
+id = "jetbrains"
+name = "JetBrains IDEs"
+kind = "ide"
+confidence = "guess"
+container_keys = ["mcpServers"]
+paths_macos = ["~/Library/Application Support/JetBrains/*/options/mcp*.xml", "~/Library/Application Support/JetBrains/*/mcp.json"]
+paths_linux = ["$XDG_CONFIG/JetBrains/*/options/mcp*.xml", "$XDG_CONFIG/JetBrains/*/mcp.json"]
+paths_windows = ["$CONFIG/JetBrains/*/options/mcp*.xml", "$CONFIG/JetBrains/*/mcp.json"]
+process_hints = ["idea", "pycharm", "webstorm", "rustrover", "goland", "clion"]
+notes = "Primarily GUI-managed and often stored as XML, which mcpurge reads but will not rewrite."
+
+[[client]]
+id = "kiro"
+name = "Kiro"
+kind = "ide"
+confidence = "verified"
+container_keys = ["mcpServers"]
+paths = ["~/.kiro/settings/mcp.json", "~/.kiro/agents/*.json"]
+project_paths = [".kiro/settings/mcp.json", ".kiro/agents/*.json"]
+process_hints = ["Kiro", "kiro"]
+notes = "Workspace config wins over user config. Per-agent JSON files can also carry an mcpServers block."
+
+# -------------------------------------------------------------- CLI agents ---
+
+[[client]]
+id = "codex"
+name = "Codex CLI"
+kind = "cli"
+confidence = "verified"
+# TOML, and the key is snake_case.
+container_keys = ["mcp_servers"]
+paths = ["~/.codex/config.toml"]
+process_hints = ["codex"]
+notes = "TOML config; mcpurge reads it but rewrites are not surgical, so removals are confirmed separately."
+
+[[client]]
+id = "gemini-cli"
+name = "Gemini CLI"
+kind = "cli"
+confidence = "verified"
+container_keys = ["mcpServers"]
+paths = ["~/.gemini/settings.json"]
+project_paths = [".gemini/settings.json"]
+process_hints = ["gemini"]
+notes = "Uses httpUrl (not url) for remote servers."
+
+[[client]]
+id = "pi"
+name = "Pi coding agent"
+kind = "cli"
+confidence = "reported"
+container_keys = ["mcpServers"]
+paths = ["~/.pi/agent/mcp.json", "~/.pi/mcp.json"]
+project_paths = [".pi/mcp.json"]
+process_hints = ["pi"]
+notes = "Native MCP since Pi 1.0 (Oct 2026) via Codemode. Same mcpServers shape as Cursor."
+
+[[client]]
+id = "dsh"
+name = "DeepSeek Harness (dsh)"
+kind = "cli"
+confidence = "guess"
+container_keys = ["mcpServers", "mcp_servers"]
+paths = ["~/.dsh/mcp.json", "~/.dsh/config.json", "$XDG_CONFIG/dsh/mcp.json", "~/.deepseek/mcp.json"]
+project_paths = [".dsh/mcp.json"]
+process_hints = ["dsh", "deepseek"]
+notes = "DeepSeek's harness CLI accepts Pi-style MCP config via translation. Paths unconfirmed - the content sweep is the real safety net here."
+
+[[client]]
+id = "opencode"
+name = "OpenCode"
+kind = "cli"
+confidence = "verified"
+# Different key AND a different per-server shape.
+container_keys = ["mcp"]
+paths = ["$XDG_CONFIG/opencode/opencode.json", "$XDG_CONFIG/opencode/opencode.jsonc", "~/.opencode.json"]
+project_paths = ["opencode.json", "opencode.jsonc"]
+process_hints = ["opencode"]
+
+[[client]]
+id = "crush"
+name = "Crush"
+kind = "cli"
+confidence = "guess"
+container_keys = ["mcp", "mcpServers"]
+paths = ["$XDG_CONFIG/crush/crush.json", "~/.crush.json"]
+project_paths = ["crush.json", ".crush.json"]
+process_hints = ["crush"]
+
+[[client]]
+id = "goose"
+name = "Goose"
+kind = "cli"
+confidence = "verified"
+# YAML, and servers live under `extensions` with cmd/args rather than command.
+container_keys = ["extensions", "mcpServers"]
+paths = ["$XDG_CONFIG/goose/config.yaml", "$XDG_CONFIG/goose/config.yml"]
+paths_windows = ["$CONFIG/goose/config.yaml"]
+process_hints = ["goose"]
+notes = "YAML; `extensions` entries use cmd instead of command, which the parser treats as an alias."
+
+[[client]]
+id = "copilot-cli"
+name = "GitHub Copilot CLI"
+kind = "cli"
+confidence = "reported"
+container_keys = ["mcpServers", "servers"]
+paths = ["~/.copilot/mcp-config.json", "~/.copilot/config.json"]
+process_hints = ["copilot"]
+
+[[client]]
+id = "amazon-q"
+name = "Amazon Q Developer"
+kind = "cli"
+confidence = "verified"
+container_keys = ["mcpServers"]
+paths = ["~/.aws/amazonq/default.json", "~/.aws/amazonq/agents/*.json", "~/.aws/amazonq/mcp.json"]
+project_paths = [".amazonq/default.json", ".amazonq/agents/*.json", ".amazonq/mcp.json"]
+process_hints = ["q", "amazonq"]
+notes = "Legacy mcp.json is still read when useLegacyMcpJson is set."
+
+[[client]]
+id = "qwen-code"
+name = "Qwen Code"
+kind = "cli"
+confidence = "guess"
+container_keys = ["mcpServers"]
+paths = ["~/.qwen/settings.json"]
+project_paths = [".qwen/settings.json"]
+process_hints = ["qwen"]
+notes = "Gemini CLI fork, so the same settings.json shape is expected."
+
+# ------------------------------------------------------- Editor extensions ---
+
+[[client]]
+id = "cline"
+name = "Cline"
+kind = "extension"
+confidence = "reported"
+container_keys = ["mcpServers"]
+paths = ["~/.cline/data/settings/cline_mcp_settings.json", "~/.cline/mcp.json"]
+paths_macos = ["~/Library/Application Support/*/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"]
+paths_linux = ["$XDG_CONFIG/*/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"]
+paths_windows = ["$CONFIG/*/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"]
+project_paths = [".cline/mcp.json"]
+process_hints = ["cline"]
+notes = "Cline's docs and its code disagree on the CLI path, so both are probed."
+
+[[client]]
+id = "roo-code"
+name = "Roo Code"
+kind = "extension"
+confidence = "reported"
+container_keys = ["mcpServers"]
+paths_macos = ["~/Library/Application Support/*/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json"]
+paths_linux = ["$XDG_CONFIG/*/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json"]
+paths_windows = ["$CONFIG/*/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json"]
+project_paths = [".roo/mcp.json"]
+process_hints = ["roo"]
+notes = "Project .roo/mcp.json takes precedence over the global file."
+
+[[client]]
+id = "kilo-code"
+name = "Kilo Code"
+kind = "extension"
+confidence = "guess"
+container_keys = ["mcpServers"]
+paths_macos = ["~/Library/Application Support/*/User/globalStorage/kilocode.kilo-code/settings/mcp_settings.json"]
+paths_linux = ["$XDG_CONFIG/*/User/globalStorage/kilocode.kilo-code/settings/mcp_settings.json"]
+paths_windows = ["$CONFIG/*/User/globalStorage/kilocode.kilo-code/settings/mcp_settings.json"]
+project_paths = [".kilocode/mcp.json"]
+
+[[client]]
+id = "continue"
+name = "Continue"
+kind = "extension"
+confidence = "reported"
+container_keys = ["mcpServers", "experimental"]
+paths = ["~/.continue/config.json", "~/.continue/config.yaml", "~/.continue/mcpServers/*.yaml", "~/.continue/assistants/*.yaml"]
+paths_macos = ["~/Library/Application Support/Continue/config.json"]
+paths_windows = ["$CONFIG/Continue/config.json"]
+process_hints = ["continue"]
+
+# ------------------------------------------------- Local-model desktop apps ---
+
+[[client]]
+id = "lm-studio"
+name = "LM Studio"
+kind = "desktop"
+confidence = "verified"
+container_keys = ["mcpServers"]
+paths = ["~/.lmstudio/mcp.json"]
+process_hints = ["LM Studio", "lms"]
+notes = "MCP support since 0.3.17; follows Cursor's mcp.json notation."
+
+[[client]]
+id = "jan"
+name = "Jan"
+kind = "desktop"
+confidence = "reported"
+container_keys = ["mcpServers"]
+paths = ["~/.jan/data/mcp_config.json", "~/jan/data/mcp_config.json"]
+paths_macos = ["~/Library/Application Support/Jan/data/mcp_config.json"]
+paths_windows = ["$CONFIG/Jan/data/mcp_config.json"]
+process_hints = ["Jan", "jan"]
+notes = "mcp_config.json inside Jan's data folder; the folder is user-relocatable."
+
+[[client]]
+id = "5ire"
+name = "5ire"
+kind = "desktop"
+confidence = "reported"
+container_keys = ["mcpServers", "servers"]
+paths_macos = ["~/Library/Application Support/5ire/mcp.json"]
+paths_linux = ["$XDG_CONFIG/5ire/mcp.json"]
+paths_windows = ["$CONFIG/5ire/mcp.json"]
+process_hints = ["5ire"]
+notes = "Electron userData/mcp.json."
+
+[[client]]
+id = "witsy"
+name = "Witsy"
+kind = "desktop"
+confidence = "guess"
+container_keys = ["mcpServers", "mcp"]
+paths_macos = ["~/Library/Application Support/Witsy/settings.json", "~/Library/Application Support/Witsy/mcp.json"]
+paths_linux = ["$XDG_CONFIG/Witsy/settings.json", "$XDG_CONFIG/Witsy/mcp.json"]
+paths_windows = ["$CONFIG/Witsy/settings.json", "$CONFIG/Witsy/mcp.json"]
+process_hints = ["Witsy"]
+
+[[client]]
+id = "chatbox"
+name = "Chatbox"
+kind = "desktop"
+confidence = "guess"
+container_keys = ["mcpServers", "mcp"]
+paths_macos = ["~/Library/Application Support/xyz.chatboxapp.app/config.json", "~/Library/Application Support/chatbox/config.json"]
+paths_linux = ["$XDG_CONFIG/xyz.chatboxapp.app/config.json", "$XDG_CONFIG/chatbox/config.json"]
+paths_windows = ["$CONFIG/xyz.chatboxapp.app/config.json", "$CONFIG/chatbox/config.json"]
+process_hints = ["Chatbox", "chatbox"]
+notes = "Vendor has not documented the path; both reported bundle ids are probed."
+
+[[client]]
+id = "anythingllm"
+name = "AnythingLLM"
+kind = "desktop"
+confidence = "guess"
+container_keys = ["mcpServers"]
+paths_macos = ["~/Library/Application Support/anythingllm-desktop/storage/plugins/anythingllm_mcp_servers.json"]
+paths_linux = ["$XDG_CONFIG/anythingllm-desktop/storage/plugins/anythingllm_mcp_servers.json", "~/.anythingllm/storage/plugins/anythingllm_mcp_servers.json"]
+paths_windows = ["$CONFIG/anythingllm-desktop/storage/plugins/anythingllm_mcp_servers.json"]
+process_hints = ["AnythingLLM"]
+
+[[client]]
+id = "cherry-studio"
+name = "Cherry Studio"
+kind = "desktop"
+confidence = "verified"
+container_keys = ["mcpServers"]
+paths_macos = ["~/Library/Application Support/CherryStudio/**/*.json"]
+paths_linux = ["$XDG_CONFIG/CherryStudio/**/*.json"]
+paths_windows = ["$CONFIG/CherryStudio/**/*.json"]
+process_hints = ["Cherry Studio", "CherryStudio"]
+# Confirmed by the maintainers: there is no editable JSON config.
+editable = false
+notes = "Keeps MCP servers in redux-persist state, not a JSON file. mcpurge can find and stop its server processes, but removal must be done in Settings > MCP Servers inside the app."
+
+[[client]]
+id = "librechat"
+name = "LibreChat"
+kind = "server"
+confidence = "reported"
+container_keys = ["mcpServers"]
+paths = ["~/librechat.yaml", "$XDG_CONFIG/librechat/librechat.yaml"]
+project_paths = ["librechat.yaml", "librechat.yml"]
+process_hints = ["librechat"]
+
+[[client]]
+id = "open-webui"
+name = "Open WebUI (mcpo)"
+kind = "server"
+confidence = "guess"
+container_keys = ["mcpServers"]
+paths = ["~/.open-webui/mcpo.json", "$XDG_CONFIG/mcpo/config.json", "~/mcpo.json"]
+project_paths = ["mcpo.json", "config.json"]
+process_hints = ["mcpo", "open-webui"]
+notes = "Open WebUI reaches MCP through the mcpo proxy, which takes a Claude-shaped config."
+
+# ----------------------------------------------------------------- Runtimes ---
+# Not MCP clients. Listed so the UI can say we looked, rather than leaving the
+# user wondering why their local model runner is absent.
+
+[[runtime]]
+id = "ollama"
+name = "Ollama"
+process_hints = ["ollama", "Ollama"]
+default_port = 11434
+notes = "Inference server with no native MCP support (feature request still open). MCP reaches Ollama models through a separate host such as LM Studio, Goose, Continue or ollmcp."
+
+[[runtime]]
+id = "llama-cpp"
+name = "llama.cpp server"
+process_hints = ["llama-server", "llama.cpp"]
+default_port = 8080
+notes = "Raw inference server; no MCP layer of its own."
+
+[[runtime]]
+id = "vllm"
+name = "vLLM"
+process_hints = ["vllm"]
+default_port = 8000
+notes = "Inference server; no MCP layer of its own."
