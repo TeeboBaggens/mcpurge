@@ -61,8 +61,8 @@ An early build offered to delete that 1.4 GB path. It is a *project directory
 the server was granted access to* — the user's work, not server files. Paths
 named in a server's arguments are now classified `data path` and are never
 deletable, alongside system paths, app bundles, and shared caches like
-`~/.cache/uv` that back every uv tool on the machine. The detail pane shows
-them with a lock.
+`~/.cache/uv` that back every uv tool on the machine. The detail pane marks
+them `kept`.
 
 ## Safety model
 
@@ -144,8 +144,8 @@ reason is shown:
 A bare generic launcher never matches on its own: two different `uvx` servers
 must not be confused for each other.
 
-A ⚠ beside a PID means more than one config entry claims that process — the
-same server registered in two clients is indistinguishable at the process
+`(shared)` beside a PID means more than one config entry claims that process —
+the same server registered in two clients is indistinguishable at the process
 level, so stopping it affects both.
 
 ## Clients covered
@@ -213,13 +213,34 @@ The engine is independent of the GUI — `model`, `registry`, `scan`, `proc`,
 `files` and `purge` have no egui dependency, which is what lets `--list` and
 `--json` work headlessly and keeps the parsing and editing logic unit-testable.
 
-Tests of note: the UI is rendered headlessly for every tab and dialog, so a
-layout or id-collision panic fails the build; the config rewriter is checked for comment preservation,
-dangling commas, deeply nested pointers and byte-identical sibling tokens; the
-process matcher is checked against the real `npx` → `npm exec` wrapper chain;
-and there are named regression tests for both bugs that the first real scan
-uncovered (`allow_path_arguments_are_never_deletable`,
+Tests of note. The UI is rendered headlessly for every tab, dialog and detail
+pane, so a layout or id-collision panic fails the build. One test goes further
+and drives real pointer input through the real widget tree with `egui_kittest`
+(`clicking_a_row_opens_the_detail_pane_with_its_actions`), because a widget that
+renders correctly and ignores input looks identical to a passing render test —
+see below. Another renders every view with the missing-glyph policy set to panic
+(`every_view_renders_with_real_fonts`), which is how a character the bundled
+fonts lack gets caught before it ships as an empty box. The config rewriter is
+checked for comment preservation, dangling commas, deeply nested pointers and
+byte-identical sibling tokens; the process matcher against the real
+`npx` → `npm exec` wrapper chain; and there are named regression tests for the
+bugs the first real scan uncovered (`allow_path_arguments_are_never_deletable`,
 `home_directory_is_not_a_project_root`).
+
+### The rows that did nothing
+
+Worth recording, because the tests were green the whole time. `egui_extras`
+senses `Sense::hover()` on table cells by default, so `row.response().clicked()`
+was permanently false; and egui labels sense click-and-drag for text selection,
+so a label inside a click-sensing cell swallows the click before the row sees
+it. Both are needed: `TableBuilder::sense(Sense::click())` *and*
+`interaction.selectable_labels = false` on the table's `Ui`. With either one
+missing, clicking a server did nothing at all — no detail pane, and therefore no
+way to reach any per-server action.
+
+Every UI test at the time set `selected` by hand, so all of them passed while
+the app could not be used. The lesson is cheap to state and was not cheap to
+find: a render test proves a widget draws, not that it responds.
 
 ## License
 

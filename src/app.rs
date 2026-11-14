@@ -125,6 +125,16 @@ enum LogKind {
     Warn,
 }
 
+/// What the server table's context menu needs, copied out of a [`Finding`]
+/// before the row's cells borrow it, so the menu closure is free to take
+/// `&mut self`.
+struct RowActions {
+    key: String,
+    label: String,
+    pids: Vec<u32>,
+    tree: Vec<u32>,
+}
+
 pub struct McpurgeApp {
     registry: Registry,
     result: ScanResult,
@@ -555,13 +565,18 @@ impl McpurgeApp {
                 ui.separator();
 
                 if self.tab == Tab::Servers {
-                    egui::ComboBox::from_id_salt("filter")
+                    // The combo's own text is its value ("all", "running"), which
+                    // says nothing about what it filters, so it gets a visible
+                    // label and is wired to it for screen readers.
+                    let filter_label = ui.label("filter");
+                    let filter = egui::ComboBox::from_id_salt("filter")
                         .selected_text(self.filter.label())
                         .show_ui(ui, |ui| {
                             for f in Filter::ALL {
                                 ui.selectable_value(&mut self.filter, f, f.label());
                             }
                         });
+                    filter.response.labelled_by(filter_label.id);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.search)
                             .hint_text("search name, client, command or path")
@@ -585,7 +600,9 @@ impl McpurgeApp {
     fn bottom_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::bottom("log")
             .resizable(true)
-            .default_size(130.0)
+            // Enough for the header and a couple of lines. It is resizable, and
+            // an empty log should not eat a sixth of the window on launch.
+            .default_size(84.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.strong("Activity");
@@ -639,11 +656,32 @@ impl McpurgeApp {
                 return;
             }
 
+            ui.add_space(2.0);
+            ui.weak(
+                "Click a server to inspect it, stop it or remove it \u{2014} \
+                 or right-click a row for the same actions.",
+            );
+            ui.add_space(2.0);
+
+            // Labels sense click-and-drag for text selection by default, and a
+            // label sitting in a click-sensing cell swallows the click before
+            // the row ever sees it — so the row's own `clicked()` stays false
+            // wherever there is text to click, which is everywhere that matters.
+            // Selectable text belongs in the detail pane, not the table.
+            ui.style_mut().interaction.selectable_labels = false;
+
             let claims = self.pid_claims();
+            let can_act = self.busy.is_none() && !self.scanning;
             let row_height = 24.0;
             TableBuilder::new(ui)
                 .striped(true)
                 .resizable(true)
+                // egui_extras senses `hover()` on cells by default, which leaves
+                // `row.response().clicked()` permanently false: rows highlight
+                // under the pointer and then do nothing. Without this the detail
+                // pane can never open, so every per-server action sits behind a
+                // click that is silently discarded.
+                .sense(egui::Sense::click())
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .column(Column::exact(16.0))
                 .column(Column::initial(170.0).at_least(90.0))
@@ -682,6 +720,22 @@ impl McpurgeApp {
                         let selected = self.selected.as_deref() == Some(key.as_str());
                         row.set_selected(selected);
 
+                        let actions = RowActions {
+                            key: key.clone(),
+                            label: format!(
+                                "{} ({})",
+                                finding.entry.name, finding.entry.client_name
+                            ),
+                            pids: finding.procs.iter().map(|p| p.pid).collect(),
+                            tree: finding
+                                .procs
+                                .iter()
+                                .flat_map(|p| {
+                                    std::iter::once(p.pid).chain(p.descendants.iter().copied())
+                                })
+                                .collect(),
+                        };
+
                         row.col(|ui| status_dot(ui, finding));
                         row.col(|ui| {
                             let mut text = egui::RichText::new(&finding.entry.name);
@@ -717,7 +771,7 @@ impl McpurgeApp {
                                 let label = format!(
                                     "pid {}{}",
                                     pids.join(", "),
-                                    if shared { " \u{26a0}" } else { "" }
+                                    if shared { " (shared)" } else { "" }
                                 );
                                 let resp =
                                     ui.colored_label(egui::Color32::from_rgb(64, 190, 120), label);
@@ -742,9 +796,39 @@ impl McpurgeApp {
                             }
                         });
 
-                        if row.response().clicked() {
+                        let resp = row.response();
+                        if resp.clicked() {
                             self.selected = Some(key.clone());
                         }
+                        resp.context_menu(|ui| {
+                            ui.label(egui::RichText::new(&actions.label).strong());
+                            ui.separator();
+                            if ui
+                                .add_enabled(
+                                    can_act && !actions.tree.is_empty(),
+                                    egui::Button::new("Stop process tree\u{2026}"),
+                                )
+                                .clicked()
+                            {
+                                self.selected = Some(actions.key.clone());
+                                self.confirm = Some(Confirm::Kill {
+                                    label: actions.label.clone(),
+                                    pids: actions.pids.clone(),
+                                    tree: actions.tree.clone(),
+                                });
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(can_act, egui::Button::new("Remove\u{2026}"))
+                                .clicked()
+                            {
+                                self.selected = Some(actions.key.clone());
+                                self.confirm = Some(Confirm::Purge {
+                                    key: actions.key.clone(),
+                                });
+                                ui.close();
+                            }
+                        });
                     });
                 });
         });
@@ -763,6 +847,15 @@ impl McpurgeApp {
             .default_size(400.0)
             .min_size(300.0)
             .show(ui, |ui| {
+                // The actions get their own bottom panel, shown before the scroll
+                // area so they claim their space first and stay on screen. At the
+                // end of the scrolled content instead, a server with a long
+                // artifact list pushes "Remove" below the fold.
+                egui::Panel::bottom("detail-actions").show(ui, |ui| {
+                    ui.add_space(6.0);
+                    self.detail_actions(ui, &key, &finding);
+                    ui.add_space(2.0);
+                });
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.heading(&finding.entry.name);
@@ -945,8 +1038,12 @@ impl McpurgeApp {
                     } else {
                         for a in &finding.artifacts {
                             ui.horizontal_wrapped(|ui| {
+                                // Words, not symbols: egui's bundled fonts
+                                // (Ubuntu-Light plus a five-glyph icon font)
+                                // have no lock or warning sign, and a missing
+                                // glyph is drawn as an empty box.
                                 if a.shared {
-                                    ui.colored_label(egui::Color32::from_gray(140), "\u{1f512}")
+                                    ui.colored_label(egui::Color32::from_gray(150), "kept")
                                         .on_hover_text("protected: never deleted");
                                 } else {
                                     ui.label("\u{2022}");
@@ -968,42 +1065,46 @@ impl McpurgeApp {
                         ui.weak(format!("{} could be reclaimed", human_bytes(reclaim)));
                     }
 
-                    // ---- actions -----------------------------------------------
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        let can_act = self.busy.is_none() && !self.scanning;
-                        if ui
-                            .add_enabled(
-                                can_act && finding.is_running(),
-                                egui::Button::new("Stop process tree\u{2026}"),
-                            )
-                            .on_hover_text("SIGTERM the server and its children, then SIGKILL any survivors")
-                            .clicked()
-                        {
-                            let tree: Vec<u32> = finding
-                                .procs
-                                .iter()
-                                .flat_map(|p| {
-                                    std::iter::once(p.pid).chain(p.descendants.iter().copied())
-                                })
-                                .collect();
-                            self.confirm = Some(Confirm::Kill {
-                                label: format!("{} ({})", finding.entry.name, finding.entry.client_name),
-                                pids: finding.procs.iter().map(|p| p.pid).collect(),
-                                tree,
-                            });
-                        }
-                        if ui
-                            .add_enabled(can_act, egui::Button::new("Remove\u{2026}"))
-                            .on_hover_text("unregister from this client, with a backup first")
-                            .clicked()
-                        {
-                            self.confirm = Some(Confirm::Purge { key: key.clone() });
-                        }
-                    });
                 });
             });
+    }
+
+    /// The per-server actions, pinned to the bottom of the detail pane.
+    fn detail_actions(&mut self, ui: &mut egui::Ui, key: &str, finding: &Finding) {
+        ui.horizontal(|ui| {
+            let can_act = self.busy.is_none() && !self.scanning;
+            if ui
+                .add_enabled(
+                    can_act && finding.is_running(),
+                    egui::Button::new("Stop process tree\u{2026}"),
+                )
+                .on_hover_text("SIGTERM the server and its children, then SIGKILL any survivors")
+                .clicked()
+            {
+                let tree: Vec<u32> = finding
+                    .procs
+                    .iter()
+                    .flat_map(|p| std::iter::once(p.pid).chain(p.descendants.iter().copied()))
+                    .collect();
+                self.confirm = Some(Confirm::Kill {
+                    label: format!("{} ({})", finding.entry.name, finding.entry.client_name),
+                    pids: finding.procs.iter().map(|p| p.pid).collect(),
+                    tree,
+                });
+            }
+            if ui
+                .add_enabled(
+                    can_act,
+                    egui::Button::new(egui::RichText::new("Remove\u{2026}").strong()),
+                )
+                .on_hover_text("unregister from this client, with a backup first")
+                .clicked()
+            {
+                self.confirm = Some(Confirm::Purge {
+                    key: key.to_string(),
+                });
+            }
+        });
     }
 
     fn orphans_panel(&mut self, ui: &mut egui::Ui) {
@@ -1280,7 +1381,11 @@ impl McpurgeApp {
                         if ui.button("Cancel").clicked() {
                             keep_open = false;
                         }
-                        if ui.button(egui::RichText::new("Stop it").strong()).clicked() {
+                        let danger = ui.visuals().error_fg_color;
+                        if ui
+                            .button(egui::RichText::new("Stop it").strong().color(danger))
+                            .clicked()
+                        {
                             self.spawn_kill(ctx, label.clone(), pids.clone());
                             keep_open = false;
                         }
@@ -1401,10 +1506,13 @@ impl McpurgeApp {
                         if ui.button("Cancel").clicked() {
                             keep_open = false;
                         }
+                        let danger = ui.visuals().error_fg_color;
                         if ui
                             .add_enabled(
                                 editable,
-                                egui::Button::new(egui::RichText::new("Remove").strong()),
+                                egui::Button::new(
+                                    egui::RichText::new("Remove").strong().color(danger),
+                                ),
                             )
                             .clicked()
                         {
@@ -1512,8 +1620,17 @@ mod tests {
             artifacts: vec![],
         };
 
+        // The same server registered in a second client, claiming the same
+        // process. This is what marks a pid "(shared)", and it is the case where
+        // stopping one entry's process also stops the other's.
+        let mut shared = running.clone();
+        shared.entry.client_id = "claude-code".into();
+        shared.entry.client_name = "Claude Code".into();
+        shared.entry.source.path = "/Users/test/.claude.json".into();
+        shared.artifacts.clear();
+
         ScanResult {
-            findings: vec![running, remote, disabled],
+            findings: vec![running, remote, disabled, shared],
             orphans: vec![OrphanProc {
                 proc: RunningProc {
                     pid: 9001,
@@ -1572,6 +1689,96 @@ mod tests {
                 }
             });
         }
+    }
+
+    /// Renders every tab, and the detail pane for every finding, through a real
+    /// font stack.
+    ///
+    /// `egui::__run_test_ui` lays widgets out but leaves the missing-glyph
+    /// policy at its default, which silently substitutes an empty box, so it
+    /// cannot see a character the bundled fonts lack. kittest sets the policy to
+    /// panic. That is what caught the lock and warning symbols this UI used to
+    /// draw: egui 0.37's default fonts are Ubuntu-Light plus a five-glyph icon
+    /// font, and neither has them.
+    #[test]
+    fn every_view_renders_with_real_fonts() {
+        let keys: Vec<String> = populated().findings.iter().map(|f| f.entry.key()).collect();
+        for tab in [Tab::Servers, Tab::Orphans, Tab::Coverage] {
+            for selected in std::iter::once(None).chain(keys.iter().cloned().map(Some)) {
+                let mut app = fixture();
+                app.tab = tab;
+                app.selected = selected;
+                app.reveal_env = true;
+                let mut harness = egui_kittest::Harness::builder()
+                    .with_size(egui::vec2(1280.0, 800.0))
+                    .build_ui_state(
+                        |ui, app: &mut McpurgeApp| {
+                            app.top_bar(ui);
+                            app.bottom_bar(ui);
+                            match app.tab {
+                                Tab::Servers => {
+                                    app.detail_panel(ui);
+                                    app.servers_table(ui);
+                                }
+                                Tab::Orphans => app.orphans_panel(ui),
+                                Tab::Coverage => app.coverage_panel(ui),
+                            }
+                        },
+                        app,
+                    );
+                harness.run();
+            }
+        }
+    }
+
+    /// Drives the real pointer through the real table.
+    ///
+    /// This exists because of the bug it catches: `egui_extras` senses
+    /// `hover()` on table cells by default, so `row.response().clicked()` was
+    /// permanently false. Rows highlighted under the pointer and did nothing,
+    /// the detail pane never opened, and every per-server action was therefore
+    /// unreachable. The other UI tests here all set `selected` by hand, so they
+    /// passed while the app could not be used at all.
+    #[test]
+    fn clicking_a_row_opens_the_detail_pane_with_its_actions() {
+        use egui_kittest::kittest::Queryable as _;
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1280.0, 800.0))
+            .build_ui_state(
+                |ui, app: &mut McpurgeApp| {
+                    app.top_bar(ui);
+                    app.bottom_bar(ui);
+                    app.detail_panel(ui);
+                    app.servers_table(ui);
+                },
+                fixture(),
+            );
+        harness.run();
+        assert!(
+            harness.state().selected.is_none(),
+            "nothing is selected before the click"
+        );
+
+        // "rea" is registered in two clients, so take the first of the two rows:
+        // either one proves the click landed.
+        harness
+            .get_all_by_label("rea")
+            .next()
+            .expect("a 'rea' row")
+            .click();
+        harness.run();
+
+        let selected = harness.state().selected.clone();
+        assert!(
+            selected.as_deref().is_some_and(|k| k.ends_with("::rea")),
+            "clicking the 'rea' row should select it, got {selected:?}"
+        );
+
+        // And the actions have to be on screen rather than below the fold:
+        // `get_by_label` panics if the widget is not in the tree.
+        harness.get_by_label("Remove\u{2026}");
+        harness.get_by_label("Stop process tree\u{2026}");
     }
 
     #[test]
@@ -1641,11 +1848,12 @@ mod tests {
     #[test]
     fn filters_and_search_narrow_the_table() {
         let mut app = fixture();
-        assert_eq!(app.visible().len(), 3);
+        // rea in two clients, crawl4ai, godot-ai.
+        assert_eq!(app.visible().len(), 4);
 
         app.filter = Filter::Running;
-        assert_eq!(app.visible().len(), 1);
-        assert_eq!(app.visible()[0].entry.name, "rea");
+        assert_eq!(app.visible().len(), 2);
+        assert!(app.visible().iter().all(|f| f.entry.name == "rea"));
 
         app.filter = Filter::Stopped;
         assert_eq!(app.visible().len(), 2);
@@ -1658,17 +1866,17 @@ mod tests {
         );
 
         app.filter = Filter::Local;
-        assert_eq!(app.visible().len(), 1);
+        assert_eq!(app.visible().len(), 2);
 
         // Disabled servers can be hidden.
         app.filter = Filter::All;
         app.show_disabled = false;
-        assert_eq!(app.visible().len(), 2);
+        assert_eq!(app.visible().len(), 3);
 
         // Search matches name, client, command and path.
         app.show_disabled = true;
         app.search = "rea-agents".into();
-        assert_eq!(app.visible().len(), 1, "should match on the command line");
+        assert_eq!(app.visible().len(), 2, "should match on the command line");
         app.search = "kiro".into();
         assert_eq!(app.visible().len(), 3, "should match on the client name");
         app.search = "nothing-matches-this".into();
@@ -1677,18 +1885,14 @@ mod tests {
 
     #[test]
     fn a_process_claimed_by_two_entries_is_counted_twice() {
-        // The warning marker in the table depends on this count.
-        let mut result = populated();
-        let mut duplicate = result.findings[0].clone();
-        duplicate.entry.client_id = "claude-code".into();
-        duplicate.entry.client_name = "Claude Code".into();
-        duplicate.entry.source.path = "/Users/test/.claude.json".into();
-        result.findings.push(duplicate);
-
-        let mut app = fixture();
-        app.result = result;
+        // The "(shared)" marker in the table depends on this count. The
+        // fixture registers the same server in Kiro and in Claude Code, both
+        // resolving to pid 4242.
+        let app = fixture();
         let claims = app.pid_claims();
         assert_eq!(claims.get(&4242), Some(&2));
+        // Only the pids the table shows are counted; descendants are not.
+        assert_eq!(claims.get(&4243), None);
     }
 
     #[test]
@@ -1707,7 +1911,7 @@ mod tests {
         assert!(!app.scanning, "the spinner must stop when the scan lands");
         assert!(app.progress.is_empty());
         assert!(
-            app.log.iter().any(|l| l.text.contains("3 server(s)")),
+            app.log.iter().any(|l| l.text.contains("4 server(s)")),
             "the scan summary should be logged"
         );
         // The parse error from the result is surfaced as a warning.
