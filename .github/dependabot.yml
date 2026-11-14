@@ -1,0 +1,59 @@
+# Dependency update policy for mcpurge.
+#
+# Intent: see major-version bumps and critical/security fixes, ignore routine
+# minor and patch churn.
+#
+# The two `ignore` entries below pair `dependency-name` with an explicit
+# `update-types` list. That pairing matters: per GitHub's Dependabot options
+# reference, `update-types` applies ONLY to version updates, so security
+# updates are still raised at any semver level - including patch. An ignore
+# entry that names a dependency WITHOUT `update-types` expands to ">= 0" and
+# would suppress its security PRs as well, so never write one of those here.
+#
+# Critical bug fixes that have no advisory attached are caught separately by
+# the scheduled `cargo deny check advisories` run in .github/workflows/ci.yml.
+#
+# Verified against GitHub's Dependabot options reference on 2026-11-13.
+version: 2
+
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "rust"
+    ignore:
+      # Routine minor/patch churn only. Security updates bypass this.
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
+    groups:
+      # One PR per major bump so each breaking change is reviewed on its own,
+      # rather than a single PR that bundles several.
+      cargo-security:
+        applies-to: "security-updates"
+        patterns:
+          - "*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
