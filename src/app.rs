@@ -9,7 +9,7 @@
 //! spells out the exact files and config keys involved, and environment values
 //! stay masked until asked for, because MCP configs are full of API tokens.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -23,6 +23,7 @@ use crate::proc::{self, KillReport};
 use crate::purge::{self, Manifest, PurgeOptions, PurgeReport};
 use crate::registry::{Registry, RegistrySource};
 use crate::scan::{self, ScanOptions};
+use crate::theme::{self, ThemeMode};
 
 /// Launch the GUI.
 pub fn run() -> anyhow::Result<()> {
@@ -52,13 +53,23 @@ enum Msg {
         label: String,
         report: KillReport,
     },
+    /// One removal run, which may have covered several entries. Carrying
+    /// them together keeps the spinner on for the whole run and lets the table
+    /// drop every removed row in one go.
     Purged {
-        label: String,
-        result: Result<PurgeReport, String>,
+        items: Vec<PurgedItem>,
     },
     Undone {
         result: Result<PurgeReport, String>,
     },
+}
+
+/// One entry's outcome inside a removal run.
+struct PurgedItem {
+    label: String,
+    /// The entry's key, so a successful removal can be reflected immediately.
+    key: String,
+    result: Result<PurgeReport, String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -111,6 +122,18 @@ enum Confirm {
     Purge {
         key: String,
     },
+    /// Several entries at once. Kept separate from [`Confirm::Purge`] because
+    /// the question is a different one: the dialog has to account for several
+    /// config files, several clients, and entries that cannot be edited.
+    PurgeMany {
+        keys: Vec<String>,
+    },
+    KillMany {
+        /// One label per entry, so the dialog can name them all.
+        labels: Vec<String>,
+        pids: Vec<u32>,
+        tree: Vec<u32>,
+    },
 }
 
 struct LogLine {
@@ -148,6 +171,9 @@ pub struct McpurgeApp {
     measure_artifacts: bool,
     extra_roots: Vec<PathBuf>,
     selected: Option<String>,
+    /// Entries ticked for a bulk action. Keys, not indices, so the set
+    /// survives a rescan that reorders or drops rows.
+    checked: BTreeSet<String>,
     confirm: Option<Confirm>,
     busy: Option<String>,
     /// Opt-ins for the purge dialog, remembered between uses.
@@ -157,9 +183,18 @@ pub struct McpurgeApp {
     reveal_env: bool,
     log: Vec<LogLine>,
     last_manifest: Option<Manifest>,
+    theme: ThemeMode,
+    /// Set by Edit > Find, consumed by the search box on the next frame.
+    focus_search: bool,
+    about_open: bool,
+    /// Coverage tab: hide clients that declared nothing.
+    coverage_only_hits: bool,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
 }
+
+/// Storage key for the one preference worth remembering between runs.
+const THEME_KEY: &str = "mcpurge.theme";
 
 impl McpurgeApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -168,6 +203,11 @@ impl McpurgeApp {
             Registry::builtin().expect("the bundled registry must parse")
         });
         let mut app = Self::with_registry(registry);
+        app.theme = cc
+            .storage
+            .and_then(|s| eframe::get_value::<ThemeMode>(s, THEME_KEY))
+            .unwrap_or_default();
+        theme::apply(&cc.egui_ctx, app.theme);
         app.info(format!(
             "registry: {} ({} clients, {} runtimes)",
             match &app.registry.source {
@@ -199,6 +239,7 @@ impl McpurgeApp {
             measure_artifacts: true,
             extra_roots: Vec::new(),
             selected: None,
+            checked: BTreeSet::new(),
             confirm: None,
             busy: None,
             purge_delete_files: false,
@@ -207,6 +248,10 @@ impl McpurgeApp {
             reveal_env: false,
             log: Vec::new(),
             last_manifest: None,
+            theme: ThemeMode::default(),
+            focus_search: false,
+            about_open: false,
+            coverage_only_hits: false,
             tx,
             rx,
         }
@@ -277,12 +322,16 @@ impl McpurgeApp {
                     for e in result.errors.iter().take(5) {
                         self.warn(e.clone());
                     }
-                    // Keep the selection if that server still exists.
+                    // Keep the selection and the tick marks only for servers
+                    // that still exist.
                     if let Some(sel) = &self.selected
                         && !result.findings.iter().any(|f| &f.entry.key() == sel)
                     {
                         self.selected = None;
                     }
+                    let keys: BTreeSet<String> =
+                        result.findings.iter().map(|f| f.entry.key()).collect();
+                    self.checked.retain(|k| keys.contains(k));
                     self.result = *result;
                 }
                 Msg::Killed { label, report } => {
@@ -298,22 +347,44 @@ impl McpurgeApp {
                             self.warn(format!("  pid {} ({}): {}", o.pid, o.name, o.detail));
                         }
                     }
+                    // Anything confirmed dead stops being shown as running
+                    // straight away. Waiting for a rescan would leave the table
+                    // asserting something we know to be false.
+                    let gone: Vec<u32> = report
+                        .outcomes
+                        .iter()
+                        .filter(|o| o.exited)
+                        .map(|o| o.pid)
+                        .collect();
+                    self.forget_pids(&gone);
                 }
-                Msg::Purged { label, result } => {
+                Msg::Purged { items } => {
                     self.busy = None;
-                    match result {
-                        Ok(report) => {
-                            for s in &report.steps {
-                                self.good(format!("{label}: {s}"));
+                    let mut removed: Vec<String> = Vec::new();
+                    for item in items {
+                        let PurgedItem { label, key, result } = item;
+                        match result {
+                            Ok(report) => {
+                                for s in &report.steps {
+                                    self.good(format!("{label}: {s}"));
+                                }
+                                for w in &report.warnings {
+                                    self.warn(format!("{label}: {w}"));
+                                }
+                                if let Some(m) = report.manifest {
+                                    self.last_manifest = Some(m);
+                                }
+                                removed.push(key);
                             }
-                            for w in &report.warnings {
-                                self.warn(format!("{label}: {w}"));
-                            }
-                            if let Some(m) = report.manifest {
-                                self.last_manifest = Some(m);
-                            }
+                            Err(e) => self.warn(format!("{label}: {e}")),
                         }
-                        Err(e) => self.warn(format!("{label}: {e}")),
+                    }
+                    if !removed.is_empty() {
+                        let n = self.forget_entries(&removed);
+                        self.info(format!(
+                            "{n} server(s) removed from the list. Rescan to re-read the \
+                             configs from disk."
+                        ));
                     }
                 }
                 Msg::Undone { result } => {
@@ -333,6 +404,39 @@ impl McpurgeApp {
                 }
             }
         }
+    }
+
+    /// Drop entries whose config was just removed, so the table reflects the
+    /// removal at once. The alternative is a full rescan, which takes long
+    /// enough on a real machine to look like nothing happened.
+    fn forget_entries(&mut self, keys: &[String]) -> usize {
+        let drop: BTreeSet<&str> = keys.iter().map(String::as_str).collect();
+        let before = self.result.findings.len();
+        self.result
+            .findings
+            .retain(|f| !drop.contains(f.entry.key().as_str()));
+        self.checked.retain(|k| !drop.contains(k.as_str()));
+        if let Some(sel) = &self.selected
+            && drop.contains(sel.as_str())
+        {
+            self.selected = None;
+        }
+        before - self.result.findings.len()
+    }
+
+    /// Forget processes we have just confirmed dead, everywhere they appear.
+    fn forget_pids(&mut self, pids: &[u32]) {
+        if pids.is_empty() {
+            return;
+        }
+        let dead: BTreeSet<u32> = pids.iter().copied().collect();
+        for f in &mut self.result.findings {
+            f.procs.retain(|p| !dead.contains(&p.pid));
+            for p in &mut f.procs {
+                p.descendants.retain(|d| !dead.contains(d));
+            }
+        }
+        self.result.orphans.retain(|o| !dead.contains(&o.proc.pid));
     }
 
     fn visible(&self) -> Vec<&Finding> {
@@ -409,26 +513,61 @@ impl McpurgeApp {
         });
     }
 
-    fn spawn_purge(&mut self, ctx: &egui::Context, key: String) {
-        let Some(finding) = self.finding(&key) else {
+    fn spawn_purge(&mut self, ctx: &egui::Context, keys: Vec<String>) {
+        // Everything the worker needs is copied out first: it must not hold a
+        // borrow on the app while the UI keeps drawing.
+        let jobs: Vec<_> = keys
+            .iter()
+            .filter_map(|key| {
+                let f = self.finding(key)?;
+                Some((
+                    key.clone(),
+                    format!("{} ({})", f.entry.name, f.entry.client_name),
+                    f.entry.clone(),
+                    f.artifacts.clone(),
+                ))
+            })
+            .collect();
+        if jobs.is_empty() {
             return;
-        };
-        let entry = finding.entry.clone();
-        let artifacts = finding.artifacts.clone();
-        let label = format!("{} ({})", entry.name, entry.client_name);
+        }
+
         let opts = PurgeOptions {
             remove_config: true,
             delete_files: self.purge_delete_files,
             permanent: self.purge_permanent,
         };
-        self.busy = Some(format!("removing {label}"));
+        self.busy = Some(if jobs.len() == 1 {
+            format!("removing {}", jobs[0].1)
+        } else {
+            format!("removing {} servers", jobs.len())
+        });
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = purge::purge(&entry, &artifacts, &opts).map_err(|e| e.to_string());
-            let _ = tx.send(Msg::Purged { label, result });
+            // Sequentially, because two entries can live in one file and each
+            // removal re-reads it. Running them in parallel would have one
+            // overwrite the other's edit.
+            let items = jobs
+                .into_iter()
+                .map(|(key, label, entry, artifacts)| PurgedItem {
+                    label,
+                    key,
+                    result: purge::purge(&entry, &artifacts, &opts).map_err(|e| e.to_string()),
+                })
+                .collect();
+            let _ = tx.send(Msg::Purged { items });
             ctx.request_repaint();
         });
+    }
+
+    /// Every entry currently ticked, in the order the table shows them.
+    fn checked_keys(&self) -> Vec<String> {
+        self.visible()
+            .iter()
+            .map(|f| f.entry.key())
+            .filter(|k| self.checked.contains(k))
+            .collect()
     }
 
     fn spawn_undo(&mut self, ctx: &egui::Context) {
@@ -470,6 +609,38 @@ fn status_dot(ui: &mut egui::Ui, finding: &Finding) {
     response.on_hover_text(tip);
 }
 
+/// A number with a caption under it. Used for the Coverage tab's summary,
+/// where the counts are the point and the prose is support.
+fn stat_tile(
+    ui: &mut egui::Ui,
+    value: String,
+    caption: &str,
+    sub: &str,
+    tint: Option<egui::Color32>,
+) {
+    ui.group(|ui| {
+        ui.vertical(|ui| {
+            ui.set_min_width(118.0);
+            let mut big = egui::RichText::new(value).size(26.0).strong();
+            if let Some(c) = tint {
+                big = big.color(c);
+            }
+            ui.label(big);
+            ui.label(caption);
+            if !sub.is_empty() {
+                ui.weak(sub);
+            }
+        });
+    });
+}
+
+/// A labelled divider between sections of a long page.
+fn section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(16.0);
+    ui.label(egui::RichText::new(title).size(15.0).strong());
+    ui.separator();
+}
+
 fn confidence_badge(ui: &mut egui::Ui, c: MatchConfidence) {
     let (text, color) = match c {
         MatchConfidence::Strong => ("strong", egui::Color32::from_rgb(64, 190, 120)),
@@ -481,6 +652,10 @@ fn confidence_badge(ui: &mut egui::Ui, c: MatchConfidence) {
 }
 
 impl eframe::App for McpurgeApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, THEME_KEY, &self.theme);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.pump();
 
@@ -501,6 +676,7 @@ impl eframe::App for McpurgeApp {
         // Cloning the context is cheap (it is an Arc) and releases the borrow
         // on `ui` so the dialog can take `&mut self`.
         let ctx = ui.ctx().clone();
+        self.about_window(&ctx);
         self.confirm_dialog(&ctx);
     }
 }
@@ -509,6 +685,7 @@ impl McpurgeApp {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         egui::Panel::top("top").show(ui, |ui| {
+            self.menu_bar(ui);
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.heading("mcpurge");
@@ -577,11 +754,14 @@ impl McpurgeApp {
                             }
                         });
                     filter.response.labelled_by(filter_label.id);
-                    ui.add(
+                    let search = ui.add(
                         egui::TextEdit::singleline(&mut self.search)
                             .hint_text("search name, client, command or path")
                             .desired_width(240.0),
                     );
+                    if std::mem::take(&mut self.focus_search) {
+                        search.request_focus();
+                    }
                     ui.checkbox(&mut self.show_disabled, "show disabled");
                 }
 
@@ -595,6 +775,180 @@ impl McpurgeApp {
             });
             ui.add_space(4.0);
         });
+    }
+
+    /// Edit / View / Window / Help.
+    ///
+    /// Everything here is reachable some other way as well; the menus exist so
+    /// that it can be *found*, which a row of unlabelled checkboxes does not
+    /// manage on its own.
+    fn menu_bar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("Edit", |ui| {
+                let can_undo = self.last_manifest.is_some() && self.busy.is_none();
+                if ui
+                    .add_enabled(can_undo, egui::Button::new("Undo last removal"))
+                    .clicked()
+                {
+                    self.spawn_undo(&ctx);
+                    ui.close();
+                }
+                ui.separator();
+                let on_servers = self.tab == Tab::Servers;
+                if ui
+                    .add_enabled(on_servers, egui::Button::new("Select all"))
+                    .clicked()
+                {
+                    self.checked = self.visible().iter().map(|f| f.entry.key()).collect();
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(!self.checked.is_empty(), egui::Button::new("Select none"))
+                    .clicked()
+                {
+                    self.checked.clear();
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(on_servers, egui::Button::new("Find\u{2026}"))
+                    .clicked()
+                {
+                    self.focus_search = true;
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(!self.search.is_empty(), egui::Button::new("Clear search"))
+                    .clicked()
+                {
+                    self.search.clear();
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("View", |ui| {
+                ui.label("Theme");
+                for mode in ThemeMode::ALL {
+                    if ui
+                        .radio(self.theme == mode, mode.label())
+                        .on_hover_text(match mode {
+                            ThemeMode::System => "match the desktop's light or dark setting",
+                            ThemeMode::Light => "greige paper, dark bark ink",
+                            ThemeMode::Dark => "warm brown, soft parchment ink",
+                        })
+                        .clicked()
+                    {
+                        self.theme = mode;
+                        theme::apply(&ctx, mode);
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                ui.selectable_value(&mut self.tab, Tab::Servers, "Servers");
+                ui.selectable_value(&mut self.tab, Tab::Orphans, "Orphans");
+                ui.selectable_value(&mut self.tab, Tab::Coverage, "Coverage");
+                ui.separator();
+                ui.checkbox(&mut self.show_disabled, "Show disabled servers");
+                ui.checkbox(&mut self.reveal_env, "Reveal environment values");
+                ui.separator();
+                ui.checkbox(&mut self.sweep, "Deep sweep on next scan");
+                ui.checkbox(&mut self.measure_artifacts, "Measure file sizes");
+                if ui
+                    .add_enabled(
+                        !self.scanning && self.busy.is_none(),
+                        egui::Button::new("Rescan now"),
+                    )
+                    .clicked()
+                {
+                    self.start_scan(&ctx);
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("Window", |ui| {
+                if ui.button("Minimise").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    ui.close();
+                }
+                if ui.button("Zoom").clicked() {
+                    let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Close window").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+
+            ui.menu_button("Help", |ui| {
+                if ui
+                    .button("Open backups folder")
+                    .on_hover_text(purge::backups_root().display().to_string())
+                    .clicked()
+                {
+                    let dir = purge::backups_root();
+                    std::fs::create_dir_all(&dir).ok();
+                    if let Err(e) = crate::files::reveal(&dir) {
+                        self.warn(format!("could not open {}: {e}", dir.display()));
+                    }
+                    ui.close();
+                }
+                if let Some(path) = crate::registry::user_registry_path()
+                    && ui
+                        .button("Show the client registry location")
+                        .on_hover_text("copy the bundled registry here to add a client")
+                        .clicked()
+                {
+                    self.info(format!("client registry override: {}", path.display()));
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Project page").clicked() {
+                    if let Err(e) = open::that("https://github.com/TeeboBaggens/mcpurge") {
+                        self.warn(format!("could not open the browser: {e}"));
+                    }
+                    ui.close();
+                }
+                if ui.button("About mcpurge").clicked() {
+                    self.about_open = true;
+                    ui.close();
+                }
+            });
+        });
+    }
+
+    /// A small About window, opened from the Help menu.
+    fn about_window(&mut self, ctx: &egui::Context) {
+        if !self.about_open {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("About mcpurge")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                ui.heading(format!("mcpurge {}", env!("CARGO_PKG_VERSION")));
+                ui.label(env!("CARGO_PKG_DESCRIPTION"));
+                ui.add_space(8.0);
+                ui.label(format!(
+                    "Registry: {} ({} clients, {} runtimes)",
+                    match &self.registry.source {
+                        RegistrySource::Builtin => "built in".to_string(),
+                        RegistrySource::User(p) => p.display().to_string(),
+                    },
+                    self.registry.clients.len(),
+                    self.registry.runtimes.len()
+                ));
+                ui.label(format!("Backups: {}", purge::backups_root().display()));
+                ui.add_space(8.0);
+                ui.weak("MIT OR Apache-2.0");
+            });
+        self.about_open = open;
     }
 
     fn bottom_bar(&mut self, ui: &mut egui::Ui) {
@@ -640,6 +994,86 @@ impl McpurgeApp {
             });
     }
 
+    /// The line above the table: a hint when nothing is ticked, and the batch
+    /// actions when something is. It takes the same vertical space either way,
+    /// so ticking a row does not shove the table down.
+    fn bulk_bar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let keys = self.checked_keys();
+        if keys.is_empty() {
+            ui.horizontal(|ui| {
+                ui.weak(
+                    "Click a server to inspect it, or tick several to stop or remove them \
+                     together. Right-click a row for the same actions.",
+                );
+            });
+            return;
+        }
+
+        // Collect what the batch covers before drawing, so the closure below is
+        // free to mutate the app.
+        let mut labels = Vec::new();
+        let mut pids = Vec::new();
+        let mut tree = Vec::new();
+        let mut running = 0usize;
+        for k in &keys {
+            let Some(f) = self.finding(k) else { continue };
+            labels.push(format!("{} ({})", f.entry.name, f.entry.client_name));
+            if f.is_running() {
+                running += 1;
+            }
+            for p in &f.procs {
+                pids.push(p.pid);
+                tree.push(p.pid);
+                tree.extend(p.descendants.iter().copied());
+            }
+        }
+        pids.sort_unstable();
+        pids.dedup();
+        tree.sort_unstable();
+        tree.dedup();
+        let can_act = self.busy.is_none() && !self.scanning;
+
+        ui.horizontal(|ui| {
+            // Plain strong text, not the accent colour: the accent is a
+            // background tint and is deliberately low-contrast as a foreground.
+            ui.label(egui::RichText::new(format!("{} selected", keys.len())).strong());
+            ui.separator();
+            if ui
+                .add_enabled(
+                    can_act && !pids.is_empty(),
+                    egui::Button::new(format!("Stop {running} running\u{2026}")),
+                )
+                .on_hover_text("signal every process tree behind the ticked servers")
+                .clicked()
+            {
+                self.confirm = Some(Confirm::KillMany {
+                    labels: labels.clone(),
+                    pids: pids.clone(),
+                    tree: tree.clone(),
+                });
+            }
+            if ui
+                .add_enabled(
+                    can_act,
+                    egui::Button::new(
+                        egui::RichText::new(format!("Remove {}\u{2026}", keys.len())).strong(),
+                    ),
+                )
+                .on_hover_text("unregister all of them, with a backup of every file first")
+                .clicked()
+            {
+                self.confirm = Some(Confirm::PurgeMany { keys: keys.clone() });
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("clear selection").clicked() {
+                    self.checked.clear();
+                }
+                let _ = &ctx;
+            });
+        });
+    }
+
     fn servers_table(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
             let visible: Vec<String> = self.visible().iter().map(|f| f.entry.key()).collect();
@@ -657,10 +1091,7 @@ impl McpurgeApp {
             }
 
             ui.add_space(2.0);
-            ui.weak(
-                "Click a server to inspect it, stop it or remove it \u{2014} \
-                 or right-click a row for the same actions.",
-            );
+            self.bulk_bar(ui);
             ui.add_space(2.0);
 
             // Labels sense click-and-drag for text selection by default, and a
@@ -683,6 +1114,7 @@ impl McpurgeApp {
                 // click that is silently discarded.
                 .sense(egui::Sense::click())
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .column(Column::exact(22.0))
                 .column(Column::exact(16.0))
                 .column(Column::initial(170.0).at_least(90.0))
                 .column(Column::initial(150.0).at_least(80.0))
@@ -691,6 +1123,26 @@ impl McpurgeApp {
                 .column(Column::initial(150.0).at_least(80.0))
                 .column(Column::remainder().at_least(90.0))
                 .header(22.0, |mut header| {
+                    header.col(|ui| {
+                        // Ticking the header ticks everything the filter is
+                        // currently showing, never the rows hidden by it.
+                        let mut all =
+                            !visible.is_empty() && visible.iter().all(|k| self.checked.contains(k));
+                        if ui
+                            .checkbox(&mut all, "")
+                            .accessible_name("select all servers")
+                            .on_hover_text("select every server matching the current filter")
+                            .changed()
+                        {
+                            if all {
+                                self.checked.extend(visible.iter().cloned());
+                            } else {
+                                for k in &visible {
+                                    self.checked.remove(k);
+                                }
+                            }
+                        }
+                    });
                     header.col(|_| {});
                     header.col(|ui| {
                         ui.strong("Server");
@@ -719,6 +1171,11 @@ impl McpurgeApp {
                         };
                         let selected = self.selected.as_deref() == Some(key.as_str());
                         row.set_selected(selected);
+                        let ticked = self.checked.contains(key);
+                        // The checkbox is drawn inside the row, which borrows
+                        // the finding, so the change is recorded and applied
+                        // once that borrow is gone.
+                        let mut tick_changed: Option<bool> = None;
 
                         let actions = RowActions {
                             key: key.clone(),
@@ -736,6 +1193,21 @@ impl McpurgeApp {
                                 .collect(),
                         };
 
+                        row.col(|ui| {
+                            let mut on = ticked;
+                            // A bare tick box says nothing to a screen reader,
+                            // and there is one per row, so each is named.
+                            if ui
+                                .checkbox(&mut on, "")
+                                .accessible_name(format!(
+                                    "select {} in {}",
+                                    finding.entry.name, finding.entry.client_name
+                                ))
+                                .changed()
+                            {
+                                tick_changed = Some(on);
+                            }
+                        });
                         row.col(|ui| status_dot(ui, finding));
                         row.col(|ui| {
                             let mut text = egui::RichText::new(&finding.entry.name);
@@ -797,11 +1269,30 @@ impl McpurgeApp {
                         });
 
                         let resp = row.response();
-                        if resp.clicked() {
-                            self.selected = Some(key.clone());
+                        match tick_changed {
+                            Some(true) => {
+                                self.checked.insert(key.clone());
+                            }
+                            Some(false) => {
+                                self.checked.remove(key);
+                            }
+                            None => {
+                                if resp.clicked() {
+                                    self.selected = Some(key.clone());
+                                }
+                            }
                         }
                         resp.context_menu(|ui| {
                             ui.label(egui::RichText::new(&actions.label).strong());
+                            ui.separator();
+                            let mut t = self.checked.contains(&actions.key);
+                            if ui.checkbox(&mut t, "Select for batch").changed() {
+                                if t {
+                                    self.checked.insert(actions.key.clone());
+                                } else {
+                                    self.checked.remove(&actions.key);
+                                }
+                            }
                             ui.separator();
                             if ui
                                 .add_enabled(
@@ -1185,47 +1676,92 @@ impl McpurgeApp {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.add_space(4.0);
-                    ui.heading("What mcpurge looked at");
-                    ui.label(format!(
-                        "{} config file(s) parsed in {} ms. Registry: {}.",
-                        self.result.scanned_paths.len(),
-                        self.result.duration_ms,
-                        match &self.registry.source {
-                            RegistrySource::Builtin => "built in".to_string(),
-                            RegistrySource::User(p) => p.display().to_string(),
-                        }
-                    ));
-                    if let Some(p) = crate::registry::user_registry_path() {
-                        ui.weak(format!(
-                            "Add a client without rebuilding by copying the registry to {}",
-                            p.display()
-                        ));
+                    ui.add_space(6.0);
+                    ui.heading("Did mcpurge miss anything?");
+                    ui.label(
+                        "Two passes run over this machine. First the registry below is used to \
+                         look where each known client is supposed to keep its config. Then, if \
+                         deep sweep is on, the filesystem is searched for config files by their \
+                         shape rather than their name, which finds clients the registry has \
+                         never heard of. This page reports what both passes turned up, so a \
+                         gap shows as a number rather than as silence.",
+                    );
+
+                    // ---- the five numbers that matter -------------------
+                    let servers = self.result.findings.len();
+                    let clients_with_servers: BTreeSet<&str> = self
+                        .result
+                        .findings
+                        .iter()
+                        .map(|f| f.entry.client_id.as_str())
+                        .collect();
+                    let unknown = self.result.unknown_configs.len();
+                    let unreadable = self.result.errors.len();
+                    let warn = ui.visuals().warn_fg_color;
+
+                    ui.add_space(10.0);
+                    ui.horizontal_wrapped(|ui| {
+                        stat_tile(
+                            ui,
+                            self.result.scanned_paths.len().to_string(),
+                            "config files read",
+                            &format!("in {} ms", self.result.duration_ms),
+                            None,
+                        );
+                        stat_tile(ui, servers.to_string(), "servers declared", "", None);
+                        stat_tile(
+                            ui,
+                            clients_with_servers.len().to_string(),
+                            "clients in use",
+                            &format!("out of {} known", self.registry.clients.len()),
+                            None,
+                        );
+                        stat_tile(
+                            ui,
+                            unknown.to_string(),
+                            "not recognised",
+                            "MCP config belonging to no known client",
+                            (unknown > 0).then_some(warn),
+                        );
+                        stat_tile(
+                            ui,
+                            unreadable.to_string(),
+                            "could not be read",
+                            "files that exist but could not be parsed",
+                            (unreadable > 0).then_some(warn),
+                        );
+                    });
+
+                    if !self.sweep {
+                        ui.add_space(8.0);
+                        ui.colored_label(
+                            warn,
+                            "Deep sweep is off, so only the registry's own locations were \
+                             checked. Anything belonging to an unknown client was not looked for.",
+                        );
                     }
 
-                    // Configs that are MCP-shaped but match no known client. This
-                    // is the honest coverage report: the sweep found them, the
-                    // registry could not name them.
-                    ui.add_space(8.0);
-                    ui.strong(format!(
-                        "Unrecognised MCP configs ({})",
-                        self.result.unknown_configs.len()
-                    ));
+                    // ---- unrecognised configs ---------------------------
+                    section(ui, "Config that matches no known client");
                     if self.result.unknown_configs.is_empty() {
                         ui.weak(if self.sweep {
-                            "None: every MCP config found belongs to a known client."
+                            "None. Every MCP config found on this machine belongs to a client \
+                             in the registry below."
                         } else {
-                            "Deep sweep is off, so only known locations were checked."
+                            "Not checked: turn on deep sweep and rescan."
                         });
                     } else {
                         ui.label(
-                            "These declare MCP servers but match no registry entry. Their servers \
-                         are listed under \"unidentified client\".",
+                            "These files declare MCP servers in a recognisable shape, but sit \
+                             somewhere no registry entry claims. Their servers do appear in the \
+                             Servers tab, under \"unidentified client\". Adding an entry to the \
+                             registry is what gives them a name.",
                         );
+                        ui.add_space(4.0);
                         for u in &self.result.unknown_configs {
                             ui.horizontal_wrapped(|ui| {
-                                ui.label(format!("{} server(s)", u.server_count));
-                                ui.weak(format!("[{}]", u.container_keys.join(", ")));
+                                ui.colored_label(warn, format!("{} server(s)", u.server_count));
+                                ui.weak(format!("under {}", u.container_keys.join(", ")));
                                 ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(u.path.display().to_string())
@@ -1237,69 +1773,72 @@ impl McpurgeApp {
                         }
                     }
 
-                    // Runtimes with no MCP support, so their absence is explained.
+                    // ---- the registry -----------------------------------
+                    section(ui, "Where mcpurge looked");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(format!(
+                            "{} clients in the registry ({}).",
+                            self.registry.clients.len(),
+                            match &self.registry.source {
+                                RegistrySource::Builtin => "built in".to_string(),
+                                RegistrySource::User(p) => p.display().to_string(),
+                            }
+                        ));
+                        ui.checkbox(&mut self.coverage_only_hits, "only clients with servers");
+                    });
+                    ui.weak(
+                        "Paths are hints, not promises: vendors move their config files, which \
+                         is why the sweep exists. \"verified\" means confirmed against vendor \
+                         docs or seen on a real machine; \"guess\" means probed on spec, \
+                         because probing a path that does not exist costs nothing.",
+                    );
+                    ui.add_space(6.0);
+                    self.clients_table(ui);
+
+                    // ---- runtimes ---------------------------------------
                     if !self.result.runtimes.is_empty() {
-                        ui.add_space(8.0);
-                        ui.strong("Local model runtimes (not MCP clients)");
+                        section(ui, "Local model runtimes");
+                        ui.label(
+                            "Found running, and listed here rather than as servers: these are \
+                             inference servers with no MCP support of their own. MCP reaches \
+                             their models through a separate host such as LM Studio, Goose or \
+                             Continue.",
+                        );
+                        ui.add_space(4.0);
                         for r in &self.result.runtimes {
                             ui.horizontal_wrapped(|ui| {
                                 ui.label(egui::RichText::new(&r.name).strong());
-                                ui.weak(format!("{} process(es)", r.pids.len()));
+                                ui.weak(format!(
+                                    "{} process(es): {}",
+                                    r.pids.len(),
+                                    r.pids
+                                        .iter()
+                                        .map(u32::to_string)
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ));
                             });
                             ui.weak(&r.detail);
                         }
                     }
 
-                    ui.add_space(8.0);
-                    ui.collapsing(
-                        format!("Known clients ({})", self.registry.clients.len()),
-                        |ui| {
-                            ui.label(
-                                "Paths are hints. Vendors move their config files, so anything \
-                             missed here is still caught by the content sweep.",
-                            );
-                            for c in &self.registry.clients {
-                                let found = self
-                                    .result
-                                    .findings
-                                    .iter()
-                                    .filter(|f| f.entry.client_id == c.id)
-                                    .count();
-                                ui.horizontal_wrapped(|ui| {
-                                    if found > 0 {
-                                        ui.colored_label(
-                                            egui::Color32::from_rgb(64, 190, 120),
-                                            format!("{found}"),
-                                        );
-                                    } else {
-                                        ui.weak("\u{2014}");
-                                    }
-                                    ui.label(egui::RichText::new(&c.name).strong());
-                                    ui.weak(format!("[{}]", c.confidence.label()));
-                                    ui.weak(c.container_keys.join(", "));
-                                });
-                            }
-                        },
-                    );
-
+                    // ---- problems ---------------------------------------
                     if !self.result.errors.is_empty() {
-                        ui.add_space(8.0);
-                        ui.collapsing(
-                            format!(
-                                "Files that could not be read ({})",
-                                self.result.errors.len()
-                            ),
-                            |ui| {
-                                for e in &self.result.errors {
-                                    ui.weak(e);
-                                }
-                            },
+                        section(ui, "Could not be read");
+                        ui.label(
+                            "These exist but could not be parsed, so anything they declare is \
+                             missing from the Servers tab.",
                         );
+                        ui.add_space(4.0);
+                        for e in &self.result.errors {
+                            ui.colored_label(warn, e);
+                        }
                     }
 
-                    ui.add_space(8.0);
+                    // ---- the receipt ------------------------------------
+                    ui.add_space(12.0);
                     ui.collapsing(
-                        format!("Parsed config files ({})", self.result.scanned_paths.len()),
+                        format!("Every file read ({})", self.result.scanned_paths.len()),
                         |ui| {
                             for p in &self.result.scanned_paths {
                                 ui.add(
@@ -1313,8 +1852,96 @@ impl McpurgeApp {
                             }
                         },
                     );
+                    ui.add_space(12.0);
                 });
         });
+    }
+
+    /// Every known client, how many servers it yielded, and the paths that were
+    /// probed for it on this OS. A table rather than a list, because the
+    /// question being asked is a lookup: "was *my* client checked?"
+    fn clients_table(&mut self, ui: &mut egui::Ui) {
+        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+        for f in &self.result.findings {
+            *counts.entry(f.entry.client_id.as_str()).or_insert(0) += 1;
+        }
+        let rows: Vec<(&crate::registry::Client, usize)> = self
+            .registry
+            .clients
+            .iter()
+            .map(|c| (c, counts.get(c.id.as_str()).copied().unwrap_or(0)))
+            .filter(|(_, n)| !self.coverage_only_hits || *n > 0)
+            .collect();
+
+        if rows.is_empty() {
+            ui.weak("No client in the registry declared a server on this machine.");
+            return;
+        }
+
+        let good = theme::status(ui.visuals()).good;
+        ui.style_mut().interaction.selectable_labels = false;
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .id_salt("clients")
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::initial(170.0).at_least(110.0))
+            .column(Column::exact(60.0))
+            .column(Column::exact(70.0))
+            .column(Column::remainder().at_least(200.0))
+            .header(22.0, |mut header| {
+                header.col(|ui| {
+                    ui.strong("Client");
+                });
+                header.col(|ui| {
+                    ui.strong("Servers");
+                });
+                header.col(|ui| {
+                    ui.strong("Paths");
+                });
+                header.col(|ui| {
+                    ui.strong("Looked in");
+                });
+            })
+            .body(|body| {
+                body.rows(22.0, rows.len(), |mut row| {
+                    let (c, n) = rows[row.index()];
+                    row.col(|ui| {
+                        if n > 0 {
+                            ui.label(egui::RichText::new(&c.name).strong());
+                        } else {
+                            ui.weak(&c.name);
+                        }
+                    });
+                    row.col(|ui| {
+                        if n > 0 {
+                            ui.colored_label(good, n.to_string());
+                        } else {
+                            ui.weak("\u{2014}");
+                        }
+                    });
+                    row.col(|ui| {
+                        ui.weak(c.confidence.label());
+                    });
+                    row.col(|ui| {
+                        let patterns = c.patterns_for_host();
+                        let text = if patterns.is_empty() {
+                            "found by process and sweep only".to_string()
+                        } else {
+                            patterns.join("  ")
+                        };
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(text).monospace().size(11.0))
+                                .truncate(),
+                        )
+                        .on_hover_text(if c.notes.is_empty() {
+                            c.container_keys.join(", ")
+                        } else {
+                            format!("{}\n\nkeys: {}", c.notes, c.container_keys.join(", "))
+                        });
+                    });
+                });
+            });
     }
 
     /// The confirmation step. Every destructive action states exactly what it
@@ -1325,25 +1952,35 @@ impl McpurgeApp {
         };
         let mut keep_open = true;
 
-        // A configured server and a loose orphan pose the same question, so
-        // both reduce to one target before the dialog is built.
-        let kill_target: Option<(String, Vec<u32>, Vec<u32>)> = match &confirm {
+        // One server, a loose orphan and a ticked batch all pose the same
+        // question, so they reduce to one target before the dialog is built.
+        let kill_target: Option<(Vec<String>, Vec<u32>, Vec<u32>)> = match &confirm {
             Confirm::Kill { label, pids, tree } => {
-                Some((label.clone(), pids.clone(), tree.clone()))
+                Some((vec![label.clone()], pids.clone(), tree.clone()))
             }
             Confirm::KillOrphan { label, pid, tree } => {
-                Some((label.clone(), vec![*pid], tree.clone()))
+                Some((vec![label.clone()], vec![*pid], tree.clone()))
             }
-            Confirm::Purge { .. } => None,
+            Confirm::KillMany { labels, pids, tree } => {
+                Some((labels.clone(), pids.clone(), tree.clone()))
+            }
+            Confirm::Purge { .. } | Confirm::PurgeMany { .. } => None,
         };
 
-        if let Some((label, pids, tree)) = kill_target {
+        if let Some((labels, pids, tree)) = kill_target {
             {
+                let label = labels.join(", ");
                 egui::Modal::new(egui::Id::unique("mcpurge-confirm-kill")).show(ctx, |ui| {
                     ui.set_width(520.0);
-                    ui.heading("Stop this server?");
+                    ui.heading(if labels.len() == 1 {
+                        "Stop this server?".to_string()
+                    } else {
+                        format!("Stop these {} servers?", labels.len())
+                    });
                     ui.add_space(4.0);
-                    ui.label(label.as_str());
+                    for l in &labels {
+                        ui.label(l.as_str());
+                    }
                     ui.add_space(6.0);
                     ui.label(format!(
                         "{} process(es) will be signalled, including {} in the subtree:",
@@ -1387,6 +2024,205 @@ impl McpurgeApp {
                             .clicked()
                         {
                             self.spawn_kill(ctx, label.clone(), pids.clone());
+                            keep_open = false;
+                        }
+                    });
+                });
+            }
+        } else if let Confirm::PurgeMany { keys } = &confirm {
+            {
+                // Everything the dialog has to account for, gathered once:
+                // which entries can actually be edited, how many distinct
+                // files are involved, and what is safe to delete.
+                struct Row {
+                    key: String,
+                    name: String,
+                    client: String,
+                    scope: String,
+                    path: PathBuf,
+                    editable: bool,
+                    running: usize,
+                    rewrites: bool,
+                }
+                let rows: Vec<Row> = keys
+                    .iter()
+                    .filter_map(|k| {
+                        let f = self.finding(k)?;
+                        Some(Row {
+                            key: k.clone(),
+                            name: f.entry.name.clone(),
+                            client: f.entry.client_name.clone(),
+                            scope: f.entry.scope.to_string(),
+                            path: f.entry.source.path.clone(),
+                            editable: self
+                                .registry
+                                .client(&f.entry.client_id)
+                                .map(|c| c.editable)
+                                .unwrap_or(true),
+                            running: f.procs.len(),
+                            rewrites: !f.entry.source.format.supports_surgical_edit(),
+                        })
+                    })
+                    .collect();
+                if rows.is_empty() {
+                    return;
+                }
+                let editable_keys: Vec<String> = rows
+                    .iter()
+                    .filter(|r| r.editable)
+                    .map(|r| r.key.clone())
+                    .collect();
+                let files: BTreeSet<&std::path::Path> =
+                    rows.iter().map(|r| r.path.as_path()).collect();
+                let running: usize = rows.iter().map(|r| r.running).sum();
+                let blocked = rows.len() - editable_keys.len();
+                let rewrites = rows.iter().filter(|r| r.rewrites).count();
+
+                // One path can back several entries, so size it once. Owned,
+                // so no borrow of the app outlives this into the modal.
+                let mut unique: BTreeMap<PathBuf, u64> = BTreeMap::new();
+                for r in &rows {
+                    if let Some(f) = self.finding(&r.key) {
+                        for a in f.deletable_artifacts() {
+                            unique.insert(a.path.clone(), a.size_bytes);
+                        }
+                    }
+                }
+                let delete_bytes: u64 = unique.values().sum();
+                let delete_count = unique.len();
+
+                egui::Modal::new(egui::Id::unique("mcpurge-confirm-purge-many")).show(ctx, |ui| {
+                    ui.set_width(640.0);
+                    let warn = ui.visuals().warn_fg_color;
+                    ui.heading(format!("Remove {} servers?", rows.len()));
+                    ui.label(format!("from {} config file(s)", files.len()));
+                    ui.add_space(8.0);
+
+                    egui::ScrollArea::vertical()
+                        .max_height(180.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            for r in &rows {
+                                ui.horizontal_wrapped(|ui| {
+                                    if r.editable {
+                                        ui.label(egui::RichText::new(&r.name).strong());
+                                    } else {
+                                        ui.colored_label(warn, format!("{} (skipped)", r.name));
+                                    }
+                                    ui.weak(format!("{} · {}", r.client, r.scope));
+                                    if r.running > 0 {
+                                        ui.weak(format!("{} running", r.running));
+                                    }
+                                });
+                            }
+                        });
+
+                    ui.add_space(8.0);
+                    ui.strong("This will:");
+                    ui.label(format!(
+                        "1. Back up {} config file(s) to {}",
+                        files.len(),
+                        purge::backups_root().display()
+                    ));
+                    ui.label(format!(
+                        "2. Remove {} key(s), one file at a time",
+                        editable_keys.len()
+                    ));
+                    if rewrites > 0 {
+                        ui.colored_label(
+                            warn,
+                            format!(
+                                "   {rewrites} of these are in a format with no format-preserving \
+                                 editor, so comments and layout may change."
+                            ),
+                        );
+                    }
+                    if blocked > 0 {
+                        ui.colored_label(
+                            warn,
+                            format!(
+                                "{blocked} entr(ies) keep their MCP list in application \
+                                 state rather than a config file and will be skipped."
+                            ),
+                        );
+                    }
+                    if running > 0 {
+                        ui.add_space(4.0);
+                        ui.colored_label(
+                            warn,
+                            format!(
+                                "{running} process(es) are still running. Removing the config \
+                                 does not stop them: use \"Stop\" as well."
+                            ),
+                        );
+                    }
+
+                    ui.add_space(8.0);
+                    ui.checkbox(
+                        &mut self.purge_delete_files,
+                        format!(
+                            "Also delete {delete_count} file set(s) on disk ({})",
+                            human_bytes(delete_bytes)
+                        ),
+                    );
+                    if self.purge_delete_files {
+                        ui.indent("bulk-files", |ui| {
+                            egui::ScrollArea::vertical()
+                                .max_height(120.0)
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    for (path, bytes) in &unique {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(human_bytes(*bytes));
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(path.display().to_string())
+                                                        .monospace(),
+                                                )
+                                                .wrap(),
+                                            );
+                                        });
+                                    }
+                                    if unique.is_empty() {
+                                        ui.weak("Nothing on disk is safe to delete for these.");
+                                    }
+                                });
+                            ui.add_space(4.0);
+                            ui.checkbox(
+                                &mut self.purge_permanent,
+                                "Delete permanently instead of moving to the trash",
+                            );
+                            if self.purge_permanent {
+                                ui.colored_label(
+                                    ui.visuals().error_fg_color,
+                                    "Permanent deletion cannot be undone.",
+                                );
+                            }
+                        });
+                    }
+                    ui.weak(
+                        "Protected paths - system paths, shared caches and directories a \
+                         server was given access to - are never touched.",
+                    );
+
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            keep_open = false;
+                        }
+                        let danger = ui.visuals().error_fg_color;
+                        if ui
+                            .add_enabled(
+                                !editable_keys.is_empty(),
+                                egui::Button::new(
+                                    egui::RichText::new(format!("Remove {}", editable_keys.len()))
+                                        .strong()
+                                        .color(danger),
+                                ),
+                            )
+                            .clicked()
+                        {
+                            self.spawn_purge(ctx, editable_keys.clone());
                             keep_open = false;
                         }
                     });
@@ -1517,7 +2353,7 @@ impl McpurgeApp {
                             .clicked()
                         {
                             let key = key.clone();
-                            self.spawn_purge(ctx, key);
+                            self.spawn_purge(ctx, vec![key]);
                             keep_open = false;
                         }
                     });
@@ -1709,6 +2545,8 @@ mod tests {
                 app.tab = tab;
                 app.selected = selected;
                 app.reveal_env = true;
+                // With rows ticked, so the batch bar and its buttons draw too.
+                app.checked = keys.iter().cloned().collect();
                 let mut harness = egui_kittest::Harness::builder()
                     .with_size(egui::vec2(1280.0, 800.0))
                     .build_ui_state(
@@ -1781,6 +2619,46 @@ mod tests {
         harness.get_by_label("Stop process tree\u{2026}");
     }
 
+    /// Ticking a row for a batch must not also select it: the tick box sits
+    /// inside a click-sensing cell, so without the checkbox winning the hit
+    /// test every tick would yank the detail pane to a different server.
+    #[test]
+    fn ticking_a_row_does_not_open_the_detail_pane() {
+        use egui_kittest::kittest::Queryable as _;
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1280.0, 800.0))
+            .build_ui_state(
+                |ui, app: &mut McpurgeApp| {
+                    app.top_bar(ui);
+                    app.bottom_bar(ui);
+                    app.detail_panel(ui);
+                    app.servers_table(ui);
+                },
+                fixture(),
+            );
+        harness.run();
+
+        harness.get_by_label("select crawl4ai in Kiro").click();
+        harness.run();
+
+        assert_eq!(harness.state().checked.len(), 1, "the row is ticked");
+        assert!(
+            harness
+                .state()
+                .checked
+                .iter()
+                .all(|k| k.ends_with("::crawl4ai")),
+            "and it is the right row"
+        );
+        assert!(
+            harness.state().selected.is_none(),
+            "but ticking is not selecting"
+        );
+        // The batch bar replaced the hint, so its actions are now reachable.
+        harness.get_by_label("Remove 1\u{2026}");
+    }
+
     #[test]
     fn the_detail_pane_renders_for_every_kind_of_server() {
         let keys: Vec<String> = populated().findings.iter().map(|f| f.entry.key()).collect();
@@ -1796,6 +2674,226 @@ mod tests {
                 });
             }
         }
+    }
+
+    /// Both taupe variants, over every view. A palette that renders in dark
+    /// and panics or vanishes in light is a theme that only half exists.
+    #[test]
+    fn both_themes_render_every_view() {
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            for tab in [Tab::Servers, Tab::Orphans, Tab::Coverage] {
+                let mut app = fixture();
+                app.tab = tab;
+                app.theme = mode;
+                app.selected = Some(populated().findings[0].entry.key());
+                let mut harness = egui_kittest::Harness::builder()
+                    .with_size(egui::vec2(1280.0, 800.0))
+                    .build_ui_state(
+                        move |ui, app: &mut McpurgeApp| {
+                            theme::apply(ui.ctx(), mode);
+                            app.top_bar(ui);
+                            app.bottom_bar(ui);
+                            match app.tab {
+                                Tab::Servers => {
+                                    app.detail_panel(ui);
+                                    app.servers_table(ui);
+                                }
+                                Tab::Orphans => app.orphans_panel(ui),
+                                Tab::Coverage => app.coverage_panel(ui),
+                            }
+                        },
+                        app,
+                    );
+                harness.run();
+            }
+        }
+    }
+
+    #[test]
+    fn every_confirmation_dialog_renders() {
+        let keys: Vec<String> = populated().findings.iter().map(|f| f.entry.key()).collect();
+
+        let mut app = fixture();
+        app.confirm = Some(Confirm::PurgeMany { keys: keys.clone() });
+        app.purge_delete_files = true;
+        app.purge_permanent = true;
+        egui::__run_test_ctx(|ctx| app.confirm_dialog(ctx));
+        assert!(app.confirm.is_some(), "an unanswered dialog stays open");
+
+        let mut app = fixture();
+        app.confirm = Some(Confirm::KillMany {
+            labels: vec!["rea (Kiro)".into(), "rea (Claude Code)".into()],
+            pids: vec![4242],
+            tree: vec![4242, 4243],
+        });
+        egui::__run_test_ctx(|ctx| app.confirm_dialog(ctx));
+        assert!(app.confirm.is_some());
+    }
+
+    /// A removal has to be visible. Waiting for the next scan would leave the
+    /// table asserting the server is still configured when it is not.
+    #[test]
+    fn a_successful_removal_drops_the_row_at_once() {
+        let mut app = fixture();
+        let key = populated().findings[0].entry.key();
+        app.selected = Some(key.clone());
+        app.checked.insert(key.clone());
+        let before = app.result.findings.len();
+
+        app.tx
+            .send(Msg::Purged {
+                items: vec![PurgedItem {
+                    label: "rea (Kiro)".into(),
+                    key: key.clone(),
+                    result: Ok(PurgeReport::default()),
+                }],
+            })
+            .unwrap();
+        app.pump();
+
+        assert_eq!(app.result.findings.len(), before - 1);
+        assert!(app.finding(&key).is_none(), "the removed row is gone");
+        assert!(app.selected.is_none(), "the selection followed it");
+        assert!(!app.checked.contains(&key), "so did the tick");
+        assert!(app.busy.is_none());
+    }
+
+    /// The other half: a removal that failed must leave the row alone, or the
+    /// UI would claim a server was unregistered when its config still has it.
+    #[test]
+    fn a_failed_removal_keeps_the_row() {
+        let mut app = fixture();
+        let key = populated().findings[0].entry.key();
+        let before = app.result.findings.len();
+
+        app.tx
+            .send(Msg::Purged {
+                items: vec![PurgedItem {
+                    label: "rea (Kiro)".into(),
+                    key: key.clone(),
+                    result: Err("permission denied".into()),
+                }],
+            })
+            .unwrap();
+        app.pump();
+
+        assert_eq!(app.result.findings.len(), before);
+        assert!(app.finding(&key).is_some());
+        assert!(app.log.iter().any(|l| l.text.contains("permission denied")));
+    }
+
+    #[test]
+    fn a_batch_removal_drops_every_entry_that_succeeded() {
+        let mut app = fixture();
+        let keys: Vec<String> = populated().findings.iter().map(|f| f.entry.key()).collect();
+        app.tx
+            .send(Msg::Purged {
+                items: vec![
+                    PurgedItem {
+                        label: "a".into(),
+                        key: keys[0].clone(),
+                        result: Ok(PurgeReport::default()),
+                    },
+                    PurgedItem {
+                        label: "b".into(),
+                        key: keys[1].clone(),
+                        result: Err("nope".into()),
+                    },
+                    PurgedItem {
+                        label: "c".into(),
+                        key: keys[2].clone(),
+                        result: Ok(PurgeReport::default()),
+                    },
+                ],
+            })
+            .unwrap();
+        app.pump();
+
+        assert!(app.finding(&keys[0]).is_none());
+        assert!(app.finding(&keys[1]).is_some(), "the failure stays");
+        assert!(app.finding(&keys[2]).is_none());
+    }
+
+    /// A process confirmed dead stops being shown as running, everywhere.
+    #[test]
+    fn a_stopped_process_disappears_from_the_view() {
+        let mut app = fixture();
+        assert!(app.result.findings[0].is_running());
+        assert_eq!(app.result.orphans.len(), 1);
+
+        app.tx
+            .send(Msg::Killed {
+                label: "rea (Kiro)".into(),
+                report: KillReport {
+                    outcomes: vec![
+                        crate::proc::KillOutcome {
+                            pid: 4242,
+                            name: "npm exec".into(),
+                            signalled: true,
+                            exited: true,
+                            escalated: false,
+                            detail: "exited".into(),
+                        },
+                        crate::proc::KillOutcome {
+                            pid: 4243,
+                            name: "node".into(),
+                            signalled: true,
+                            exited: true,
+                            escalated: false,
+                            detail: "exited".into(),
+                        },
+                        crate::proc::KillOutcome {
+                            pid: 9001,
+                            name: "node".into(),
+                            signalled: true,
+                            exited: false,
+                            escalated: true,
+                            detail: "still alive".into(),
+                        },
+                    ],
+                },
+            })
+            .unwrap();
+        app.pump();
+
+        assert!(
+            app.result.findings.iter().all(|f| !f.is_running()),
+            "both entries claiming pid 4242 stop showing it"
+        );
+        assert!(
+            app.result
+                .findings
+                .iter()
+                .all(|f| f.procs.iter().all(|p| !p.descendants.contains(&4243))),
+            "the dead child is forgotten too"
+        );
+        assert_eq!(
+            app.result.orphans.len(),
+            1,
+            "a process that refused to die is still listed"
+        );
+    }
+
+    #[test]
+    fn ticks_follow_the_filter_and_survive_only_while_the_server_does() {
+        let mut app = fixture();
+        let visible: Vec<String> = app.visible().iter().map(|f| f.entry.key()).collect();
+        app.checked = visible.iter().cloned().collect();
+        assert_eq!(app.checked_keys().len(), 4);
+
+        // Narrowing the filter narrows the batch without losing the ticks.
+        app.filter = Filter::Running;
+        assert_eq!(app.checked_keys().len(), 2);
+        assert_eq!(app.checked.len(), 4);
+        app.filter = Filter::All;
+        assert_eq!(app.checked_keys().len(), 4);
+
+        // A rescan that no longer has a server drops its tick.
+        let mut smaller = populated();
+        smaller.findings.truncate(1);
+        app.tx.send(Msg::ScanDone(Box::new(smaller))).unwrap();
+        app.pump();
+        assert_eq!(app.checked.len(), 1);
     }
 
     #[test]

@@ -8,16 +8,22 @@ A single self-contained binary for macOS, Windows and Linux. No webview, no
 Node toolchain.
 
 ```
-┌─ mcpurge ──────────────────────────────┬─ Detail ─────────────┐
-│ [Rescan] [Filter: all ▾]  ☐ show stale │ rea                  │
-│                                        │ Transport: stdio     │
-│ ● rea          Kiro·user   RUNNING pid │ Cmd: npx -y          │
-│ ● rea          Claude Code RUNNING ×3  │   rea-agents@6.7.0   │
-│ ○ godot-ai     Kiro·user   stopped     │ Env: 2 vars (hidden) │
-│ ● solidcraft   Claude Code RUNNING pid │ Found in: ~/.kiro/…  │
-│ ○ crawl4ai     Claude Code stopped     │ Files: 223 MB        │
-│                                        │ [Kill tree] [Remove] │
-└────────────────────────────────────────┴──────────────────────┘
+┌ Edit  View  Window  Help ──────────────────────────────────────┐
+│ mcpurge  [Rescan]  42 servers · 6 running · 213 MB reclaimable │
+│ Servers | Orphans (1) | Coverage      filter [all ▾] [search] │
+├────────────────────────────────────────┬─ Detail ─────────────┤
+│ 3 selected  [Stop 2 running…] [Remove 3…]        clear        │
+│ ☑ ● rea        Kiro         pid 4242   │ rea                  │
+│ ☑ ○ crawl4ai   Kiro         stopped    │ Kiro · user · stdio  │
+│ ☑ ○ godot-ai   Kiro         disabled   │ npx -y               │
+│ ☐ ● rea        Claude Code  pid 4242   │   rea-agents@6.7.0   │
+│                                        │ Env: 1 var (hidden)  │
+│                                        │ Files: 213 MB        │
+│                                        ├──────────────────────┤
+│                                        │ [Stop tree…][Remove…]│
+├────────────────────────────────────────┴──────────────────────┤
+│ Activity                                  open backups  clear │
+└────────────────────────────────────────────────────────────────┘
 ```
 
 ## Why the design looks like this
@@ -117,6 +123,25 @@ mcpurge --quick       # skip measuring artifact sizes
 
 `--list` and `--json` are strictly read-only.
 
+### Selecting several at once
+
+Tick the box on any row, or the one in the header to take everything the
+current filter is showing, and the line above the table becomes a batch: stop
+every process tree behind them, or remove all of them in one confirmed step.
+The confirmation names each server, counts the config files it will back up,
+and says plainly which entries it is going to skip and why.
+
+Removals are reflected immediately: a server whose config was removed leaves
+the table there and then, and a process confirmed dead stops being shown as
+running, without waiting for the next scan.
+
+### Theme
+
+Taupe, in a light and a dark variant, under **View > Theme**; `Follow system`
+tracks the desktop. The choice is remembered between runs. Both palettes are
+checked by test: body text clears WCAG AA (4.5:1) on every surface it is drawn
+on, and the status inks and selection text clear 3:1.
+
 ### The three tabs
 
 - **Servers** — every declared server, with its client, scope, transport, live
@@ -126,9 +151,12 @@ mcpurge --quick       # skip measuring artifact sizes
 - **Orphans** — processes that look like MCP servers but match no config entry.
   These are the interesting ones: servers still running after their config was
   edited away, or started by a client mcpurge does not recognise.
-- **Coverage** — what was actually examined. Lists unrecognised MCP-shaped
-  configs, detected local-model runtimes, every known client with a hit count,
-  and files that could not be read.
+- **Coverage** — whether anything was missed. Opens with the five numbers that
+  answer it (files read, servers declared, clients in use, configs not
+  recognised, files that could not be read), then the unrecognised configs,
+  then a table of every known client showing **the exact paths probed for it on
+  this OS** — which is what answers "but did you check *mine*?" — then the
+  local-model runtimes, the read failures, and the full list of files read.
 
 ### Match confidence
 

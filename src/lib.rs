@@ -9,6 +9,7 @@
 //! * [`proc`]    - matching servers to live processes, and stopping them.
 //! * [`files`]   - locating a server's files, and judging what is safe to delete.
 //! * [`purge`]   - backup, surgical config edits, trash.
+//! * [`theme`]   - the taupe palettes, light and dark.
 //! * [`app`]     - the egui front end.
 
 pub mod app;
@@ -18,3 +19,4 @@ pub mod proc;
 pub mod purge;
 pub mod registry;
 pub mod scan;
+pub mod theme;
