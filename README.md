@@ -92,7 +92,60 @@ them `kept`.
 - **Every destructive action is confirmed** with the exact PIDs, files and
   config keys it will touch.
 
+## Updating itself
+
+mcpurge can replace itself with a newer release, under rules that match what it
+does to everything else: nothing happens without being asked, and nothing is
+accepted that cannot be verified.
+
+- **Signed, or not installed.** Every release binary carries a detached OpenPGP
+  signature made by the mcpurge release key, and the matching public key is
+  compiled into the binary rather than fetched. The signature is checked in
+  memory, before a byte is written anywhere executable. A download that does
+  not verify is discarded.
+
+  ```
+  Release signing key  E5FD 1E0C 7E53 CC18 15F4  3583 3BE1 0A2E F813 7679
+                       mcpurge release signing
+  ```
+
+  The same fingerprint is in **Help > About mcpurge**, in
+  `assets/release-signing-key.asc`, and in `SIGNING_KEY_FINGERPRINT` in
+  `src/update.rs`. Releases can be checked by hand with
+  `gpg --verify mcpurge-<target>.asc mcpurge-<target>`.
+
+- **Only Ed25519 is accepted.** The release key is an Ed25519 key, and the
+  verifier refuses any signature that is not, which keeps the OpenPGP library's
+  RSA code unreachable rather than merely unused.
+
+- **Checking is a toggle; installing never is.** **Help > Check for updates on
+  launch** controls the one network request mcpurge makes. Turn it off and the
+  app talks to nothing at all unless you pick **Check for updates…** yourself.
+  Finding a release only opens a window that names the version and asks.
+
+- **It will not overwrite a build.** Running from `target/release` during
+  development is normal; replacing that binary would clobber your build output,
+  so an install from a cargo target directory is declined with an explanation.
+
+Releases are built and signed by `.github/workflows/release.yml` on a `v*` tag,
+which refuses to publish if the tag and `Cargo.toml` disagree, and verifies each
+signature against the public key committed here before uploading anything.
+
 ## Install
+
+Download the binary for your platform from the
+[latest release](https://github.com/TeeboBaggens/mcpurge/releases/latest),
+check its signature, and put it somewhere on your `PATH`:
+
+```sh
+gpg --import assets/release-signing-key.asc   # once
+gpg --verify mcpurge-aarch64-apple-darwin.asc mcpurge-aarch64-apple-darwin
+chmod +x mcpurge-aarch64-apple-darwin
+```
+
+After that mcpurge keeps itself up to date — see [Updating itself](#updating-itself).
+
+### From source
 
 Requires Rust stable (pinned in `rust-toolchain.toml`).
 
@@ -107,8 +160,11 @@ On Linux, the GUI needs the usual X11/Wayland dev packages:
 
 ```sh
 sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev \
-  libxcb-xfixes0-dev libxkbcommon-dev
+  libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
 ```
+
+`libssl-dev` is there for the updater: it uses the platform's own TLS rather
+than bundling a copy of Mozilla's root store, so on Linux that means OpenSSL.
 
 ## Usage
 
@@ -271,7 +327,7 @@ Critical fixes that ship without an advisory are caught separately by a daily
 ## Development
 
 ```sh
-cargo test --all                              # 107 tests
+cargo test --all                              # 124 tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo deny check advisories licenses bans sources

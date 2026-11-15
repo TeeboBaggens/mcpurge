@@ -1,0 +1,63 @@
+{
+  "url": "https://api.github.com/repos/TeeboBaggens/mcpurge/releases/300000001",
+  "html_url": "https://github.com/TeeboBaggens/mcpurge/releases/tag/v0.2.0",
+  "id": 300000001,
+  "tag_name": "v0.2.0",
+  "target_commitish": "main",
+  "name": "mcpurge 0.2.0",
+  "draft": false,
+  "prerelease": false,
+  "created_at": "2026-11-15T21:00:00Z",
+  "published_at": "2026-11-15T21:05:00Z",
+  "body": "- The menus live in the macOS menu bar\n- Every invented word explains itself on hover\n",
+  "assets": [
+    {
+      "name": "mcpurge-aarch64-apple-darwin",
+      "content_type": "application/octet-stream",
+      "size": 8471232,
+      "browser_download_url": "https://github.com/TeeboBaggens/mcpurge/releases/download/v0.2.0/mcpurge-aarch64-apple-darwin"
+    },
+    {
+      "name": "mcpurge-aarch64-apple-darwin.asc",
+      "content_type": "text/plain",
+      "size": 228,
+      "browser_download_url": "https://github.com/TeeboBaggens/mcpurge/releases/download/v0.2.0/mcpurge-aarch64-apple-darwin.asc"
+    },
+    {
+      "name": "mcpurge-x86_64-apple-darwin",
+      "content_type": "application/octet-stream",
+      "size": 8923136,
+      "browser_download_url": "https://github.com/TeeboBaggens/mcpurge/releases/download/v0.2.0/mcpurge-x86_64-apple-darwin"
+    },
+    {
+      "name": "mcpurge-x86_64-apple-darwin.asc",
+      "content_type": "text/plain",
+      "size": 228,
+      "browser_download_url": "https://github.com/TeeboBaggens/mcpurge/releases/download/v0.2.0/mcpurge-x86_64-apple-darwin.asc"
+    },
+    {
+      "name": "mcpurge-x86_64-unknown-linux-gnu",
+      "content_type": "application/octet-stream",
+      "size": 9211904,
+      "browser_download_url": "https://github.com/TeeboBaggens/mcpurge/releases/download/v0.2.0/mcpurge-x86_64-unknown-linux-gnu"
+    },
+    {
+      "name": "mcpurge-x86_64-unknown-linux-gnu.asc",
+      "content_type": "text/plain",
+      "size": 228,
+      "browser_download_url": "https://github.com/TeeboBaggens/mcpurge/releases/download/v0.2.0/mcpurge-x86_64-unknown-linux-gnu.asc"
+    },
+    {
+      "name": "mcpurge-x86_64-pc-windows-msvc.exe",
+      "content_type": "application/octet-stream",
+      "size": 9502720,
+      "browser_download_url": "https://github.com/TeeboBaggens/mcpurge/releases/download/v0.2.0/mcpurge-x86_64-pc-windows-msvc.exe"
+    },
+    {
+      "name": "mcpurge-x86_64-pc-windows-msvc.exe.asc",
+      "content_type": "text/plain",
+      "size": 228,
+      "browser_download_url": "https://github.com/TeeboBaggens/mcpurge/releases/download/v0.2.0/mcpurge-x86_64-pc-windows-msvc.exe.asc"
+    }
+  ]
+}

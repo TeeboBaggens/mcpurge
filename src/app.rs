@@ -25,6 +25,7 @@ use crate::purge::{self, Manifest, PurgeOptions, PurgeReport};
 use crate::registry::{Registry, RegistrySource};
 use crate::scan::{self, ScanOptions};
 use crate::theme::{self, ThemeMode};
+use crate::update;
 
 /// Launch the GUI.
 pub fn run() -> anyhow::Result<()> {
@@ -63,6 +64,18 @@ enum Msg {
     Undone {
         result: Result<PurgeReport, String>,
     },
+    /// The answer from a release check: `None` means this build is current.
+    UpdateChecked {
+        result: Result<Option<Box<update::Available>>, String>,
+        /// Automatic checks stay quiet when there is nothing to say; a check
+        /// the user asked for always answers.
+        asked_for: bool,
+    },
+    /// A verified download, replaced over this executable.
+    UpdateInstalled {
+        result: Result<PathBuf, String>,
+        version: String,
+    },
 }
 
 /// One entry's outcome inside a removal run.
@@ -99,6 +112,8 @@ pub enum MenuAction {
     ToggleSweep,
     ToggleMeasure,
     Rescan,
+    CheckForUpdates,
+    ToggleAutoUpdateCheck,
     OpenBackups,
     ShowRegistryPath,
     ProjectPage,
@@ -215,6 +230,20 @@ pub struct McpurgeApp {
     about_open: bool,
     /// Coverage tab: hide clients that declared nothing.
     coverage_only_hits: bool,
+    /// Look for a new release on launch. The whole network side of mcpurge is
+    /// behind this one flag: with it off the app talks to nothing at all
+    /// unless the user picks "Check for updates now".
+    auto_update_check: bool,
+    /// True while a check or a download is in flight.
+    update_busy: bool,
+    /// A release newer than this build, waiting for the user to accept it.
+    update_available: Option<Box<update::Available>>,
+    /// Set once the automatic check has run, so it happens once per launch
+    /// rather than once per frame.
+    update_checked: bool,
+    /// Set after a successful install: the new binary is in place but this
+    /// process is still the old one.
+    update_installed: Option<String>,
     /// The platform's own menu bar, where there is one. `None` means the menus
     /// are drawn inside the window instead.
     native_menu: Option<NativeMenu>,
@@ -265,6 +294,17 @@ mod help {
                                it, so the client will start it again when it next needs it.";
     pub const DISABLED: &str = "the client's own config switches this server off. The entry is \
                                 still there, so it is still listed and can still be removed.";
+    pub const UPDATE_CHECK: &str = "ask GitHub whether a newer mcpurge has been released. \
+                                    Nothing is downloaded or installed without you saying so, \
+                                    and nothing is installed at all unless it carries a \
+                                    signature from the mcpurge release key.";
+    pub const UPDATE_AUTO: &str = "look for a new release once per launch. This is the only \
+                                   network request mcpurge ever makes: with it off, the app \
+                                   talks to nothing unless you ask it to check.";
+    pub const UPDATE_INSTALL: &str = "The download is checked against the mcpurge release \
+                                      signing key, which is built into this binary, before \
+                                      anything is written. A download that is not signed by \
+                                      that key is discarded.";
     pub const TAB_SERVERS: &str = "every MCP server declared by a config file on this machine.";
     pub const TAB_ORPHANS: &str = "processes that look like MCP servers but match no config \
                                    entry: left running after their config was edited away, or \
@@ -273,8 +313,9 @@ mod help {
                                     Start here if a server you expected is missing.";
 }
 
-/// Storage key for the one preference worth remembering between runs.
+/// Storage keys for the preferences worth remembering between runs.
 const THEME_KEY: &str = "mcpurge.theme";
+const AUTO_UPDATE_KEY: &str = "mcpurge.auto_update_check";
 
 impl McpurgeApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -287,6 +328,13 @@ impl McpurgeApp {
             .storage
             .and_then(|s| eframe::get_value::<ThemeMode>(s, THEME_KEY))
             .unwrap_or_default();
+        app.auto_update_check = cc
+            .storage
+            .and_then(|s| eframe::get_value::<bool>(s, AUTO_UPDATE_KEY))
+            // On by default: a tool that edits other programs' configs should
+            // not quietly go stale. It is one menu item to turn off, and off
+            // means no network traffic at all.
+            .unwrap_or(true);
         theme::apply(&cc.egui_ctx, app.theme);
         // Built here rather than in `with_registry` because it needs a live
         // window: on macOS this hands a real NSMenu to the running app.
@@ -335,6 +383,11 @@ impl McpurgeApp {
             focus_search: false,
             about_open: false,
             coverage_only_hits: false,
+            auto_update_check: true,
+            update_busy: false,
+            update_available: None,
+            update_checked: false,
+            update_installed: None,
             native_menu: None,
             tx,
             rx,
@@ -484,6 +537,42 @@ impl McpurgeApp {
                             self.last_manifest = None;
                         }
                         Err(e) => self.warn(format!("undo: {e}")),
+                    }
+                }
+                Msg::UpdateChecked { result, asked_for } => {
+                    self.update_busy = false;
+                    match result {
+                        Ok(Some(available)) => {
+                            self.info(format!("update available: {available}"));
+                            self.update_available = Some(available);
+                        }
+                        // An automatic check that finds nothing says nothing.
+                        // Only a check the user asked for owes them an answer.
+                        Ok(None) if asked_for => {
+                            self.good(format!(
+                                "mcpurge {} is the latest release",
+                                update::current_version()
+                            ));
+                        }
+                        Ok(None) => {}
+                        Err(e) if asked_for => self.warn(format!("update check: {e}")),
+                        // A failed background check is a log line, not an
+                        // interruption: the machine may simply be offline.
+                        Err(e) => self.info(format!("update check: {e}")),
+                    }
+                }
+                Msg::UpdateInstalled { result, version } => {
+                    self.update_busy = false;
+                    match result {
+                        Ok(path) => {
+                            self.good(format!(
+                                "mcpurge {version} installed to {}. Restart to use it.",
+                                path.display()
+                            ));
+                            self.update_available = None;
+                            self.update_installed = Some(version);
+                        }
+                        Err(e) => self.warn(format!("update: {e}")),
                     }
                 }
             }
@@ -654,6 +743,49 @@ impl McpurgeApp {
             .collect()
     }
 
+    /// Ask GitHub whether there is a newer release, on a thread so the window
+    /// does not wait on the network.
+    fn spawn_update_check(&mut self, ctx: &egui::Context, asked_for: bool) {
+        if self.update_busy {
+            return;
+        }
+        self.update_busy = true;
+        self.update_checked = true;
+        if asked_for {
+            self.info("checking for a new release");
+        }
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = update::check()
+                .map(|found| found.map(Box::new))
+                .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Msg::UpdateChecked { result, asked_for });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Download the release, check its signature, and only then put it in
+    /// place. The verification is inside `update::download_verified`, so this
+    /// never holds unverified bytes and a path to write them to.
+    fn spawn_update_install(&mut self, ctx: &egui::Context, available: update::Available) {
+        if self.update_busy {
+            return;
+        }
+        self.update_busy = true;
+        self.info(format!("downloading mcpurge {}", available.version));
+        let version = available.version.to_string();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = update::download_verified(&available)
+                .and_then(|bytes| update::install(&bytes))
+                .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Msg::UpdateInstalled { result, version });
+            ctx.request_repaint();
+        });
+    }
+
     fn spawn_undo(&mut self, ctx: &egui::Context) {
         let Some(manifest) = self.last_manifest.clone() else {
             return;
@@ -738,6 +870,7 @@ fn confidence_badge(ui: &mut egui::Ui, c: MatchConfidence) {
 impl eframe::App for McpurgeApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, THEME_KEY, &self.theme);
+        eframe::set_value(storage, AUTO_UPDATE_KEY, &self.auto_update_check);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -762,7 +895,15 @@ impl eframe::App for McpurgeApp {
         // on `ui` so the dialog can take `&mut self`.
         let ctx = ui.ctx().clone();
         self.about_window(&ctx);
+        self.update_window(&ctx);
         self.confirm_dialog(&ctx);
+
+        // Once per launch, and only if asked for in advance. Deferred to the
+        // first frame rather than done in the constructor so the window is up
+        // before anything touches the network.
+        if self.auto_update_check && !self.update_checked {
+            self.spawn_update_check(&ctx, false);
+        }
     }
 }
 
@@ -1002,6 +1143,26 @@ impl McpurgeApp {
 
             ui.menu_button("Help", |ui| {
                 if ui
+                    .add_enabled(
+                        !state.update_busy,
+                        egui::Button::new("Check for updates\u{2026}"),
+                    )
+                    .on_hover_text(help::UPDATE_CHECK)
+                    .clicked()
+                {
+                    action = Some(MenuAction::CheckForUpdates);
+                    ui.close();
+                }
+                let mut auto = state.auto_update_check;
+                if ui
+                    .checkbox(&mut auto, "Check for updates on launch")
+                    .on_hover_text(help::UPDATE_AUTO)
+                    .changed()
+                {
+                    action = Some(MenuAction::ToggleAutoUpdateCheck);
+                }
+                ui.separator();
+                if ui
                     .button("Open backups folder")
                     .on_hover_text(purge::backups_root().display().to_string())
                     .clicked()
@@ -1066,6 +1227,8 @@ impl McpurgeApp {
             reveal_env: self.reveal_env,
             sweep: self.sweep,
             measure: self.measure_artifacts,
+            auto_update_check: self.auto_update_check,
+            update_busy: self.update_busy,
         }
     }
 
@@ -1092,6 +1255,17 @@ impl McpurgeApp {
             MenuAction::ToggleSweep => self.sweep = !self.sweep,
             MenuAction::ToggleMeasure => self.measure_artifacts = !self.measure_artifacts,
             MenuAction::Rescan => self.start_scan(ctx),
+            MenuAction::CheckForUpdates => self.spawn_update_check(ctx, true),
+            MenuAction::ToggleAutoUpdateCheck => {
+                self.auto_update_check = !self.auto_update_check;
+                if self.auto_update_check {
+                    self.info("mcpurge will check for a new release on launch");
+                } else {
+                    self.info(
+                        "automatic update checks are off: mcpurge will make no network requests",
+                    );
+                }
+            }
             MenuAction::OpenBackups => {
                 let dir = purge::backups_root();
                 std::fs::create_dir_all(&dir).ok();
@@ -1110,6 +1284,91 @@ impl McpurgeApp {
                 }
             }
             MenuAction::About => self.about_open = true,
+        }
+    }
+
+    /// The update offer.
+    ///
+    /// Deliberately a decision rather than a notification: the window names the
+    /// version, shows what the release says about itself, and says in as many
+    /// words what will be checked before anything is written. Nothing happens
+    /// until "Download and install" is clicked.
+    fn update_window(&mut self, ctx: &egui::Context) {
+        if let Some(version) = self.update_installed.clone() {
+            let mut open = true;
+            egui::Window::new("Update installed")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.set_width(420.0);
+                    ui.label(format!(
+                        "mcpurge {version} is in place. This window is still running the old \
+                         build - quit and start it again to use the new one."
+                    ));
+                    ui.add_space(8.0);
+                    if ui.button("Quit mcpurge").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+            if !open {
+                self.update_installed = None;
+            }
+            return;
+        }
+
+        let Some(available) = self.update_available.clone() else {
+            return;
+        };
+        let mut open = true;
+        let mut install = false;
+        egui::Window::new("A new mcpurge is available")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_width(460.0);
+                ui.heading(format!("mcpurge {}", available.version));
+                ui.weak(format!(
+                    "you are running {} \u{b7} {} download",
+                    update::current_version(),
+                    human_bytes(available.size_bytes)
+                ));
+                if !available.notes.trim().is_empty() {
+                    ui.add_space(6.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(180.0)
+                        .show(ui, |ui| {
+                            ui.add(egui::Label::new(available.notes.trim()).wrap());
+                        });
+                }
+                ui.add_space(6.0);
+                ui.separator();
+                ui.label(help::UPDATE_INSTALL);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!self.update_busy, egui::Button::new("Download and install"))
+                        .clicked()
+                    {
+                        install = true;
+                    }
+                    if ui.button("Not now").clicked() {
+                        self.update_available = None;
+                    }
+                    if self.update_busy {
+                        ui.spinner();
+                        ui.weak("downloading and verifying");
+                    }
+                });
+            });
+        if !open {
+            self.update_available = None;
+        }
+        if install {
+            self.spawn_update_install(ctx, *available);
         }
     }
 
@@ -1139,6 +1398,23 @@ impl McpurgeApp {
                     self.registry.runtimes.len()
                 ));
                 ui.label(format!("Backups: {}", purge::backups_root().display()));
+                ui.add_space(8.0);
+                ui.label(format!(
+                    "Updates: {}",
+                    if self.auto_update_check {
+                        "checked on launch"
+                    } else {
+                        "off - checked only when you ask"
+                    }
+                ));
+                // The fingerprint is here so it can be compared against the
+                // one published in the repository. A verifier whose key nobody
+                // can check is a verifier you have to take on faith.
+                ui.weak(format!(
+                    "Releases signed by {}",
+                    update::SIGNING_KEY_FINGERPRINT
+                ))
+                .on_hover_text(help::UPDATE_INSTALL);
                 ui.add_space(8.0);
                 ui.weak("MIT OR Apache-2.0");
             });
@@ -2888,11 +3164,12 @@ mod tests {
 
         /// A menu item that flips a setting, paired with a way to read it.
         type Toggle = (MenuAction, fn(&McpurgeApp) -> bool);
-        let toggles: [Toggle; 4] = [
+        let toggles: [Toggle; 5] = [
             (MenuAction::ToggleDisabled, |a| a.show_disabled),
             (MenuAction::ToggleRevealEnv, |a| a.reveal_env),
             (MenuAction::ToggleSweep, |a| a.sweep),
             (MenuAction::ToggleMeasure, |a| a.measure_artifacts),
+            (MenuAction::ToggleAutoUpdateCheck, |a| a.auto_update_check),
         ];
         for (action, read) in toggles {
             let before = read(&app);
@@ -3238,6 +3515,145 @@ mod tests {
         });
         egui::__run_test_ctx(|ctx| app.confirm_dialog(ctx));
         assert!(app.confirm.is_some());
+    }
+
+    fn an_update() -> update::Available {
+        update::Available {
+            version: semver::Version::new(9, 9, 9),
+            tag: "v9.9.9".into(),
+            notes: "- Something worth having\n- Something else\n".into(),
+            binary_url: "https://example.test/mcpurge".into(),
+            signature_url: "https://example.test/mcpurge.asc".into(),
+            size_bytes: 8_471_232,
+        }
+    }
+
+    /// The updater's two windows, drawn through the real font stack: the offer
+    /// and the "now restart" note. Neither is reachable from the table, so
+    /// nothing else would notice if one of them panicked or drew a box.
+    #[test]
+    fn the_update_windows_render() {
+        let mut app = fixture();
+        app.update_available = Some(Box::new(an_update()));
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut McpurgeApp| {
+                    let ctx = ui.ctx().clone();
+                    app.update_window(&ctx);
+                },
+                app,
+            );
+        harness.run();
+        {
+            use egui_kittest::kittest::Queryable as _;
+            harness.get_by_label("Download and install");
+            harness.get_by_label("Not now");
+        }
+
+        let mut app = fixture();
+        app.update_installed = Some("9.9.9".into());
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut McpurgeApp| {
+                    let ctx = ui.ctx().clone();
+                    app.update_window(&ctx);
+                },
+                app,
+            );
+        harness.run();
+    }
+
+    /// An offer that is declined has to go away, or the window is a nag.
+    #[test]
+    fn declining_an_update_dismisses_it() {
+        use egui_kittest::kittest::Queryable as _;
+
+        let mut app = fixture();
+        app.update_available = Some(Box::new(an_update()));
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut McpurgeApp| {
+                    let ctx = ui.ctx().clone();
+                    app.update_window(&ctx);
+                },
+                app,
+            );
+        harness.run();
+        harness.get_by_label("Not now").click();
+        harness.run();
+        assert!(
+            harness.state().update_available.is_none(),
+            "'Not now' should put the offer away"
+        );
+    }
+
+    /// The messages the worker threads send back, without the network: a found
+    /// release opens the offer, and nothing else is touched.
+    #[test]
+    fn an_update_message_opens_the_offer() {
+        let mut app = fixture();
+        app.update_busy = true;
+        app.tx
+            .send(Msg::UpdateChecked {
+                result: Ok(Some(Box::new(an_update()))),
+                asked_for: true,
+            })
+            .unwrap();
+        app.pump();
+        assert!(!app.update_busy, "the spinner stops");
+        assert_eq!(
+            app.update_available.as_ref().map(|a| a.version.to_string()),
+            Some("9.9.9".into())
+        );
+
+        // A quiet "you are current" from a background check says nothing; the
+        // same answer to a check the user asked for does.
+        let mut app = fixture();
+        app.tx
+            .send(Msg::UpdateChecked {
+                result: Ok(None),
+                asked_for: false,
+            })
+            .unwrap();
+        app.pump();
+        assert!(app.log.is_empty(), "a quiet check stays quiet");
+
+        app.tx
+            .send(Msg::UpdateChecked {
+                result: Ok(None),
+                asked_for: true,
+            })
+            .unwrap();
+        app.pump();
+        assert_eq!(app.log.len(), 1, "an asked-for check answers");
+    }
+
+    /// A failed install must not claim success, and must leave the offer up so
+    /// it can be tried again.
+    #[test]
+    fn a_failed_install_is_reported_and_keeps_the_offer() {
+        let mut app = fixture();
+        app.update_available = Some(Box::new(an_update()));
+        app.update_busy = true;
+        app.tx
+            .send(Msg::UpdateInstalled {
+                result: Err("the download is not signed by the mcpurge release key".into()),
+                version: "9.9.9".into(),
+            })
+            .unwrap();
+        app.pump();
+        assert!(!app.update_busy);
+        assert!(app.update_installed.is_none(), "nothing was installed");
+        assert!(app.update_available.is_some(), "the offer stays");
+        assert!(
+            app.log.iter().any(|l| l.kind == LogKind::Warn
+                && l.text.contains("not signed by the mcpurge release key")),
+            "the refusal has to be visible, got {:?}",
+            app.log.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
     }
 
     #[test]

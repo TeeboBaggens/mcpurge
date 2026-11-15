@@ -48,6 +48,32 @@ open = "5.4.5"
 # Errors.
 anyhow = "1.0.104"
 thiserror = "2.0.21"
+# The self-updater. All four are the latest stable releases, verified against
+# the crates.io index on 2026-11-15; none publish an LTS track.
+#
+# ureq is the smallest HTTP client that is not an async runtime, and the
+# updater makes two requests. It is pinned to the platform's own TLS -
+# Security.framework, SChannel, OpenSSL - rather than its default rustls stack:
+# that keeps `ring` and its OpenSSL-licensed files out of the tree, so the
+# cargo-deny licence allow-list stays as it is, and it means certificate trust
+# follows the machine rather than a bundled root store.
+ureq = { version = "3.5.2", default-features = false, features = [
+    # Not "native-tls": that also pulls in a bundled copy of the Mozilla root
+    # store. The point of using the platform's TLS is that trust follows the
+    # machine, and a second set of roots in the binary would quietly undo that.
+    "native-tls-no-default",
+    "gzip",
+] }
+# OpenPGP, in Rust, with no gpg binary required at runtime: the updater refuses
+# anything the release signing key did not sign, and that check has to work on
+# a machine with no GnuPG on it. Default features off - the defaults pull in
+# key *generation* and secret-key handling that a verifier has no use for.
+pgp = { version = "0.21.1", default-features = false }
+# Replacing a running executable is three different problems on three
+# platforms (Windows will not let you unlink a running image). This is the
+# crate that already solved all three.
+self-replace = "1.5.1"
+semver = "1.0.28"
 
 [profile.release]
 opt-level = 2
