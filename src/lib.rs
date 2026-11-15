@@ -10,10 +10,12 @@
 //! * [`files`]   - locating a server's files, and judging what is safe to delete.
 //! * [`purge`]   - backup, surgical config edits, trash.
 //! * [`theme`]   - the taupe palettes, light and dark.
+//! * [`menu`]    - the menu bar, native on macOS and in-window elsewhere.
 //! * [`app`]     - the egui front end.
 
 pub mod app;
 pub mod files;
+pub mod menu;
 pub mod model;
 pub mod proc;
 pub mod purge;

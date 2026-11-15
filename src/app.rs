@@ -16,6 +16,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
+use crate::menu::{MenuState, NativeMenu};
 use crate::model::{
     ArtifactKind, Finding, MatchConfidence, ScanResult, human_bytes, human_duration,
 };
@@ -72,11 +73,36 @@ struct PurgedItem {
     result: Result<PurgeReport, String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Tab {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tab {
     Servers,
     Orphans,
     Coverage,
+}
+
+/// One menu item's meaning, independent of which bar it was clicked in.
+///
+/// macOS draws the menus itself (see [`crate::menu`]) and everywhere else egui
+/// draws them, so without this the two bars would be two implementations of
+/// the same list, free to drift apart.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MenuAction {
+    Undo,
+    SelectAll,
+    SelectNone,
+    Find,
+    ClearSearch,
+    Theme(ThemeMode),
+    ShowTab(Tab),
+    ToggleDisabled,
+    ToggleRevealEnv,
+    ToggleSweep,
+    ToggleMeasure,
+    Rescan,
+    OpenBackups,
+    ShowRegistryPath,
+    ProjectPage,
+    About,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -189,8 +215,62 @@ pub struct McpurgeApp {
     about_open: bool,
     /// Coverage tab: hide clients that declared nothing.
     coverage_only_hits: bool,
+    /// The platform's own menu bar, where there is one. `None` means the menus
+    /// are drawn inside the window instead.
+    native_menu: Option<NativeMenu>,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
+}
+
+/// The sentences behind the one-word labels.
+///
+/// Every column heading and every verdict the table prints is a term of art
+/// that mcpurge invented, so each one says, on hover, what it is and why it is
+/// there. They live together because they are prose, not logic, and because a
+/// term explained two different ways in two places is worse than one left
+/// unexplained.
+mod help {
+    pub const SERVER: &str = "the name the client gave this MCP server in its config. The same \
+                              server can appear more than once under different names.";
+    pub const CLIENT: &str = "the app that declares this server: an editor, a CLI agent or a \
+                              desktop chat app. Removing an entry removes it from this client \
+                              only.";
+    pub const SCOPE: &str = "who the entry applies to - your whole user account, one project, or \
+                             the whole machine. Hover a row to see the file it came from.";
+    pub const TRANSPORT: &str = "how the client reaches the server. Only stdio servers run as a \
+                                 local process, so only they can be stopped.";
+    pub const STATE: &str = "whether a process matching this entry is running right now, with the \
+                             pids mcpurge matched to it.";
+    pub const ON_DISK: &str = "how much of this server's files on disk mcpurge would be able to \
+                               delete. It counts only what is safe to delete, which is why it can \
+                               be smaller than the server's real footprint.";
+
+    /// The answer to "what does protected mean?", which is the question the
+    /// word begs the first time it is seen.
+    pub const PROTECTED: &str = "protected: mcpurge found files for this server but will not \
+                                 delete any of them.\n\nA path is protected when deleting it \
+                                 would take something other than this server with it: your own \
+                                 work handed to the server as an argument, a system or \
+                                 package-manager directory, an installed application, or a cache \
+                                 shared by every tool that uses the same package manager.\n\nOpen \
+                                 the server to see each path and the rule that kept it.";
+    pub const NO_FILES: &str = "mcpurge found no files on disk for this server. A remote server \
+                                has none, and a stopped stdio server may have been launched from \
+                                somewhere this scan did not reach.";
+    pub const KEPT: &str = "kept: this path is never deleted, whatever is ticked in the removal \
+                            dialog, because something other than this server depends on it.";
+    pub const RUNNING: &str = "a live process matched this entry. Stopping it signals the whole \
+                               process tree, not just this pid.";
+    pub const STOPPED: &str = "no running process matched this entry. The config still declares \
+                               it, so the client will start it again when it next needs it.";
+    pub const DISABLED: &str = "the client's own config switches this server off. The entry is \
+                                still there, so it is still listed and can still be removed.";
+    pub const TAB_SERVERS: &str = "every MCP server declared by a config file on this machine.";
+    pub const TAB_ORPHANS: &str = "processes that look like MCP servers but match no config \
+                                   entry: left running after their config was edited away, or \
+                                   started by a client mcpurge does not recognise.";
+    pub const TAB_COVERAGE: &str = "what mcpurge looked at, and what it could not account for. \
+                                    Start here if a server you expected is missing.";
 }
 
 /// Storage key for the one preference worth remembering between runs.
@@ -208,6 +288,9 @@ impl McpurgeApp {
             .and_then(|s| eframe::get_value::<ThemeMode>(s, THEME_KEY))
             .unwrap_or_default();
         theme::apply(&cc.egui_ctx, app.theme);
+        // Built here rather than in `with_registry` because it needs a live
+        // window: on macOS this hands a real NSMenu to the running app.
+        app.native_menu = NativeMenu::install(&cc.egui_ctx);
         app.info(format!(
             "registry: {} ({} clients, {} runtimes)",
             match &app.registry.source {
@@ -252,6 +335,7 @@ impl McpurgeApp {
             focus_search: false,
             about_open: false,
             coverage_only_hits: false,
+            native_menu: None,
             tx,
             rx,
         }
@@ -648,7 +732,7 @@ fn confidence_badge(ui: &mut egui::Ui, c: MatchConfidence) {
         MatchConfidence::Loose => ("loose", egui::Color32::from_rgb(200, 120, 90)),
     };
     ui.colored_label(color, format!("[{text}]"))
-        .on_hover_text("how confident the process match is");
+        .on_hover_text(c.explain());
 }
 
 impl eframe::App for McpurgeApp {
@@ -658,6 +742,7 @@ impl eframe::App for McpurgeApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.pump();
+        self.pump_menu(&ui.ctx().clone());
 
         // Panels are nested inside the root Ui and claim space in the order
         // they are shown, so the edges come first and the table last.
@@ -685,7 +770,10 @@ impl McpurgeApp {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         egui::Panel::top("top").show(ui, |ui| {
-            self.menu_bar(ui);
+            // Nothing to draw when the platform owns the menu bar.
+            if self.native_menu.is_none() {
+                self.menu_bar(ui);
+            }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.heading("mcpurge");
@@ -732,13 +820,16 @@ impl McpurgeApp {
 
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Servers, "Servers");
+                ui.selectable_value(&mut self.tab, Tab::Servers, "Servers")
+                    .on_hover_text(help::TAB_SERVERS);
                 ui.selectable_value(
                     &mut self.tab,
                     Tab::Orphans,
                     format!("Orphans ({})", self.result.orphans.len()),
-                );
-                ui.selectable_value(&mut self.tab, Tab::Coverage, "Coverage");
+                )
+                .on_hover_text(help::TAB_ORPHANS);
+                ui.selectable_value(&mut self.tab, Tab::Coverage, "Coverage")
+                    .on_hover_text(help::TAB_COVERAGE);
                 ui.separator();
 
                 if self.tab == Tab::Servers {
@@ -777,52 +868,58 @@ impl McpurgeApp {
         });
     }
 
-    /// Edit / View / Window / Help.
+    /// Edit / View / Window / Help, drawn inside the window.
+    ///
+    /// Only reached on platforms whose menus live in the window. On macOS the
+    /// same list is in the system menu bar and this is never called.
     ///
     /// Everything here is reachable some other way as well; the menus exist so
     /// that it can be *found*, which a row of unlabelled checkboxes does not
     /// manage on its own.
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        let state = self.menu_state();
+        let mut action = None;
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("Edit", |ui| {
-                let can_undo = self.last_manifest.is_some() && self.busy.is_none();
                 if ui
-                    .add_enabled(can_undo, egui::Button::new("Undo last removal"))
+                    .add_enabled(
+                        state.can_undo && state.can_act,
+                        egui::Button::new("Undo last removal"),
+                    )
                     .clicked()
                 {
-                    self.spawn_undo(&ctx);
-                    ui.close();
-                }
-                ui.separator();
-                let on_servers = self.tab == Tab::Servers;
-                if ui
-                    .add_enabled(on_servers, egui::Button::new("Select all"))
-                    .clicked()
-                {
-                    self.checked = self.visible().iter().map(|f| f.entry.key()).collect();
-                    ui.close();
-                }
-                if ui
-                    .add_enabled(!self.checked.is_empty(), egui::Button::new("Select none"))
-                    .clicked()
-                {
-                    self.checked.clear();
+                    action = Some(MenuAction::Undo);
                     ui.close();
                 }
                 ui.separator();
                 if ui
-                    .add_enabled(on_servers, egui::Button::new("Find\u{2026}"))
+                    .add_enabled(state.on_servers, egui::Button::new("Select all servers"))
                     .clicked()
                 {
-                    self.focus_search = true;
+                    action = Some(MenuAction::SelectAll);
                     ui.close();
                 }
                 if ui
-                    .add_enabled(!self.search.is_empty(), egui::Button::new("Clear search"))
+                    .add_enabled(state.has_checked, egui::Button::new("Deselect all"))
                     .clicked()
                 {
-                    self.search.clear();
+                    action = Some(MenuAction::SelectNone);
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(state.on_servers, egui::Button::new("Find\u{2026}"))
+                    .clicked()
+                {
+                    action = Some(MenuAction::Find);
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(state.has_search, egui::Button::new("Clear search"))
+                    .clicked()
+                {
+                    action = Some(MenuAction::ClearSearch);
                     ui.close();
                 }
             });
@@ -831,7 +928,7 @@ impl McpurgeApp {
                 ui.label("Theme");
                 for mode in ThemeMode::ALL {
                     if ui
-                        .radio(self.theme == mode, mode.label())
+                        .radio(state.theme == mode, mode.label())
                         .on_hover_text(match mode {
                             ThemeMode::System => "match the desktop's light or dark setting",
                             ThemeMode::Light => "greige paper, dark bark ink",
@@ -839,29 +936,50 @@ impl McpurgeApp {
                         })
                         .clicked()
                     {
-                        self.theme = mode;
-                        theme::apply(&ctx, mode);
+                        action = Some(MenuAction::Theme(mode));
                         ui.close();
                     }
                 }
                 ui.separator();
-                ui.selectable_value(&mut self.tab, Tab::Servers, "Servers");
-                ui.selectable_value(&mut self.tab, Tab::Orphans, "Orphans");
-                ui.selectable_value(&mut self.tab, Tab::Coverage, "Coverage");
+                for (tab, label) in [
+                    (Tab::Servers, "Servers"),
+                    (Tab::Orphans, "Orphans"),
+                    (Tab::Coverage, "Coverage"),
+                ] {
+                    if ui.selectable_label(state.tab == tab, label).clicked() {
+                        action = Some(MenuAction::ShowTab(tab));
+                        ui.close();
+                    }
+                }
                 ui.separator();
-                ui.checkbox(&mut self.show_disabled, "Show disabled servers");
-                ui.checkbox(&mut self.reveal_env, "Reveal environment values");
-                ui.separator();
-                ui.checkbox(&mut self.sweep, "Deep sweep on next scan");
-                ui.checkbox(&mut self.measure_artifacts, "Measure file sizes");
+                let mut show_disabled = state.show_disabled;
                 if ui
-                    .add_enabled(
-                        !self.scanning && self.busy.is_none(),
-                        egui::Button::new("Rescan now"),
-                    )
+                    .checkbox(&mut show_disabled, "Show disabled servers")
+                    .changed()
+                {
+                    action = Some(MenuAction::ToggleDisabled);
+                }
+                let mut reveal_env = state.reveal_env;
+                if ui
+                    .checkbox(&mut reveal_env, "Reveal environment values")
+                    .changed()
+                {
+                    action = Some(MenuAction::ToggleRevealEnv);
+                }
+                ui.separator();
+                let mut sweep = state.sweep;
+                if ui.checkbox(&mut sweep, "Deep sweep on next scan").changed() {
+                    action = Some(MenuAction::ToggleSweep);
+                }
+                let mut measure = state.measure;
+                if ui.checkbox(&mut measure, "Measure file sizes").changed() {
+                    action = Some(MenuAction::ToggleMeasure);
+                }
+                if ui
+                    .add_enabled(state.can_act, egui::Button::new("Rescan now"))
                     .clicked()
                 {
-                    self.start_scan(&ctx);
+                    action = Some(MenuAction::Rescan);
                     ui.close();
                 }
             });
@@ -888,35 +1006,111 @@ impl McpurgeApp {
                     .on_hover_text(purge::backups_root().display().to_string())
                     .clicked()
                 {
-                    let dir = purge::backups_root();
-                    std::fs::create_dir_all(&dir).ok();
-                    if let Err(e) = crate::files::reveal(&dir) {
-                        self.warn(format!("could not open {}: {e}", dir.display()));
-                    }
+                    action = Some(MenuAction::OpenBackups);
                     ui.close();
                 }
-                if let Some(path) = crate::registry::user_registry_path()
+                if crate::registry::user_registry_path().is_some()
                     && ui
                         .button("Show the client registry location")
                         .on_hover_text("copy the bundled registry here to add a client")
                         .clicked()
                 {
-                    self.info(format!("client registry override: {}", path.display()));
+                    action = Some(MenuAction::ShowRegistryPath);
                     ui.close();
                 }
                 ui.separator();
                 if ui.button("Project page").clicked() {
-                    if let Err(e) = open::that("https://github.com/TeeboBaggens/mcpurge") {
-                        self.warn(format!("could not open the browser: {e}"));
-                    }
+                    action = Some(MenuAction::ProjectPage);
                     ui.close();
                 }
                 if ui.button("About mcpurge").clicked() {
-                    self.about_open = true;
+                    action = Some(MenuAction::About);
                     ui.close();
                 }
             });
         });
+        if let Some(action) = action {
+            self.run_menu_action(action, &ctx);
+        }
+    }
+
+    /// Run whatever was clicked in the platform's menu bar, then tell it what
+    /// the app now looks like. A no-op where there is no native menu.
+    fn pump_menu(&mut self, ctx: &egui::Context) {
+        let Some(actions) = self.native_menu.as_ref().map(NativeMenu::drain) else {
+            return;
+        };
+        for action in actions {
+            self.run_menu_action(action, ctx);
+        }
+        // After, not before: an action that changed a tick should show it on
+        // this frame rather than the next one.
+        let state = self.menu_state();
+        if let Some(menu) = self.native_menu.as_ref() {
+            menu.sync(&state);
+        }
+    }
+
+    /// What the menus need to know about the app: what is ticked, what is
+    /// greyed out.
+    fn menu_state(&self) -> MenuState {
+        MenuState {
+            can_undo: self.last_manifest.is_some(),
+            can_act: self.busy.is_none() && !self.scanning,
+            on_servers: self.tab == Tab::Servers,
+            has_checked: !self.checked.is_empty(),
+            has_search: !self.search.is_empty(),
+            theme: self.theme,
+            tab: self.tab,
+            show_disabled: self.show_disabled,
+            reveal_env: self.reveal_env,
+            sweep: self.sweep,
+            measure: self.measure_artifacts,
+        }
+    }
+
+    /// Carry out a menu item. One implementation for both menu bars.
+    fn run_menu_action(&mut self, action: MenuAction, ctx: &egui::Context) {
+        match action {
+            MenuAction::Undo => self.spawn_undo(ctx),
+            MenuAction::SelectAll => {
+                self.checked = self.visible().iter().map(|f| f.entry.key()).collect();
+            }
+            MenuAction::SelectNone => self.checked.clear(),
+            MenuAction::Find => {
+                self.tab = Tab::Servers;
+                self.focus_search = true;
+            }
+            MenuAction::ClearSearch => self.search.clear(),
+            MenuAction::Theme(mode) => {
+                self.theme = mode;
+                theme::apply(ctx, mode);
+            }
+            MenuAction::ShowTab(tab) => self.tab = tab,
+            MenuAction::ToggleDisabled => self.show_disabled = !self.show_disabled,
+            MenuAction::ToggleRevealEnv => self.reveal_env = !self.reveal_env,
+            MenuAction::ToggleSweep => self.sweep = !self.sweep,
+            MenuAction::ToggleMeasure => self.measure_artifacts = !self.measure_artifacts,
+            MenuAction::Rescan => self.start_scan(ctx),
+            MenuAction::OpenBackups => {
+                let dir = purge::backups_root();
+                std::fs::create_dir_all(&dir).ok();
+                if let Err(e) = crate::files::reveal(&dir) {
+                    self.warn(format!("could not open {}: {e}", dir.display()));
+                }
+            }
+            MenuAction::ShowRegistryPath => {
+                if let Some(path) = crate::registry::user_registry_path() {
+                    self.info(format!("client registry override: {}", path.display()));
+                }
+            }
+            MenuAction::ProjectPage => {
+                if let Err(e) = open::that("https://github.com/TeeboBaggens/mcpurge") {
+                    self.warn(format!("could not open the browser: {e}"));
+                }
+            }
+            MenuAction::About => self.about_open = true,
+        }
     }
 
     /// A small About window, opened from the Help menu.
@@ -1145,22 +1339,22 @@ impl McpurgeApp {
                     });
                     header.col(|_| {});
                     header.col(|ui| {
-                        ui.strong("Server");
+                        ui.strong("Server").on_hover_text(help::SERVER);
                     });
                     header.col(|ui| {
-                        ui.strong("Client");
+                        ui.strong("Client").on_hover_text(help::CLIENT);
                     });
                     header.col(|ui| {
-                        ui.strong("Scope");
+                        ui.strong("Scope").on_hover_text(help::SCOPE);
                     });
                     header.col(|ui| {
-                        ui.strong("Transport");
+                        ui.strong("Transport").on_hover_text(help::TRANSPORT);
                     });
                     header.col(|ui| {
-                        ui.strong("State");
+                        ui.strong("State").on_hover_text(help::STATE);
                     });
                     header.col(|ui| {
-                        ui.strong("On disk");
+                        ui.strong("On disk").on_hover_text(help::ON_DISK);
                     });
                 })
                 .body(|body| {
@@ -1221,18 +1415,24 @@ impl McpurgeApp {
                         });
                         row.col(|ui| {
                             ui.label(finding.entry.scope.to_string())
-                                .on_hover_text(finding.entry.source.path.display().to_string());
+                                .on_hover_text(format!(
+                                    "{}\n\nfrom {}",
+                                    finding.entry.scope.explain(),
+                                    finding.entry.source.path.display()
+                                ));
                         });
                         row.col(|ui| {
-                            ui.label(finding.entry.transport.label());
+                            ui.label(finding.entry.transport.label())
+                                .on_hover_text(finding.entry.transport.explain());
                         });
                         row.col(|ui| {
                             if finding.procs.is_empty() {
-                                ui.weak(if finding.entry.disabled {
-                                    "disabled"
+                                let (word, why) = if finding.entry.disabled {
+                                    ("disabled", help::DISABLED)
                                 } else {
-                                    "stopped"
-                                });
+                                    ("stopped", help::STOPPED)
+                                };
+                                ui.weak(word).on_hover_text(why);
                             } else {
                                 let pids: Vec<String> =
                                     finding.procs.iter().map(|p| p.pid.to_string()).collect();
@@ -1247,24 +1447,26 @@ impl McpurgeApp {
                                 );
                                 let resp =
                                     ui.colored_label(egui::Color32::from_rgb(64, 190, 120), label);
-                                if shared {
-                                    resp.on_hover_text(
-                                        "this process is also claimed by another config entry: \
-                                         the same server is registered in more than one client, \
-                                         so stopping it affects both",
-                                    );
-                                }
+                                resp.on_hover_text(if shared {
+                                    "this process is also claimed by another config entry: the \
+                                     same server is registered in more than one client, so \
+                                     stopping it affects both"
+                                } else {
+                                    help::RUNNING
+                                });
                             }
                         });
                         row.col(|ui| {
                             let bytes: u64 =
                                 finding.deletable_artifacts().map(|a| a.size_bytes).sum();
                             if bytes > 0 {
-                                ui.label(human_bytes(bytes));
+                                ui.label(human_bytes(bytes)).on_hover_text(help::ON_DISK);
                             } else if !finding.artifacts.is_empty() {
-                                ui.weak("protected");
+                                // The question this word begs is answered on
+                                // hover rather than left to be guessed.
+                                ui.weak("protected").on_hover_text(help::PROTECTED);
                             } else {
-                                ui.weak("\u{2014}");
+                                ui.weak("\u{2014}").on_hover_text(help::NO_FILES);
                             }
                         });
 
@@ -1535,12 +1737,14 @@ impl McpurgeApp {
                                 // glyph is drawn as an empty box.
                                 if a.shared {
                                     ui.colored_label(egui::Color32::from_gray(150), "kept")
-                                        .on_hover_text("protected: never deleted");
+                                        .on_hover_text(help::KEPT);
                                 } else {
-                                    ui.label("\u{2022}");
+                                    ui.label("\u{2022}")
+                                        .on_hover_text("this path can be deleted with the server");
                                 }
                                 ui.label(human_bytes(a.size_bytes));
-                                ui.weak(format!("[{}]", a.kind.label()));
+                                ui.weak(format!("[{}]", a.kind.label()))
+                                    .on_hover_text(a.kind.explain());
                                 let text = if a.kind == ArtifactKind::DataPath {
                                     egui::RichText::new(a.path.display().to_string())
                                         .monospace()
@@ -2463,7 +2667,10 @@ mod tests {
         shared.entry.client_id = "claude-code".into();
         shared.entry.client_name = "Claude Code".into();
         shared.entry.source.path = "/Users/test/.claude.json".into();
-        shared.artifacts.clear();
+        // Keeps only the path that is never deletable, so one row in the table
+        // reads "protected" in the On disk column and the word gets rendered,
+        // hovered and explained by the tests below.
+        shared.artifacts.retain(|a| a.shared);
 
         ScanResult {
             findings: vec![running, remote, disabled, shared],
@@ -2617,6 +2824,113 @@ mod tests {
         // `get_by_label` panics if the widget is not in the tree.
         harness.get_by_label("Remove\u{2026}");
         harness.get_by_label("Stop process tree\u{2026}");
+    }
+
+    /// "protected" is a word mcpurge invented, and the first thing anyone asks
+    /// of it is what it means. The answer is a tooltip, so this hovers the way
+    /// a person would and reads what comes up; a constant that is never wired
+    /// to a widget would pass a string test and fail here.
+    #[test]
+    fn hovering_protected_explains_what_it_means() {
+        use egui_kittest::kittest::Queryable as _;
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1280.0, 800.0))
+            .build_ui_state(
+                |ui, app: &mut McpurgeApp| {
+                    app.top_bar(ui);
+                    app.servers_table(ui);
+                },
+                fixture(),
+            );
+        harness.run();
+
+        harness.get_by_label("protected").hover();
+        // Two passes: one to register the hover, one to lay the tooltip out.
+        harness.run();
+        harness.run();
+
+        assert!(
+            harness
+                .query_by_label_contains("A path is protected when deleting it")
+                .is_some(),
+            "hovering \"protected\" should explain what it means and why"
+        );
+    }
+
+    /// The menus are two bars - egui's on Windows and Linux, the system's on
+    /// macOS - and one list of actions. This tests the list, which is the half
+    /// that cannot be seen on the platform the other half runs on.
+    #[test]
+    fn menu_actions_do_what_they_say() {
+        let ctx = egui::Context::default();
+        let mut app = fixture();
+
+        app.run_menu_action(MenuAction::SelectAll, &ctx);
+        assert_eq!(app.checked.len(), app.visible().len());
+        app.run_menu_action(MenuAction::SelectNone, &ctx);
+        assert!(app.checked.is_empty());
+
+        app.search = "rea".into();
+        app.run_menu_action(MenuAction::ClearSearch, &ctx);
+        assert!(app.search.is_empty());
+
+        app.run_menu_action(MenuAction::ShowTab(Tab::Coverage), &ctx);
+        assert_eq!(app.tab, Tab::Coverage);
+        // Find has to bring the table back: the search box lives there, and
+        // focusing a widget that is not being drawn does nothing at all.
+        app.run_menu_action(MenuAction::Find, &ctx);
+        assert_eq!(app.tab, Tab::Servers);
+        assert!(app.focus_search);
+
+        app.run_menu_action(MenuAction::Theme(ThemeMode::Light), &ctx);
+        assert_eq!(app.theme, ThemeMode::Light);
+
+        /// A menu item that flips a setting, paired with a way to read it.
+        type Toggle = (MenuAction, fn(&McpurgeApp) -> bool);
+        let toggles: [Toggle; 4] = [
+            (MenuAction::ToggleDisabled, |a| a.show_disabled),
+            (MenuAction::ToggleRevealEnv, |a| a.reveal_env),
+            (MenuAction::ToggleSweep, |a| a.sweep),
+            (MenuAction::ToggleMeasure, |a| a.measure_artifacts),
+        ];
+        for (action, read) in toggles {
+            let before = read(&app);
+            app.run_menu_action(action, &ctx);
+            assert_ne!(read(&app), before, "{action:?} did not toggle anything");
+        }
+
+        app.run_menu_action(MenuAction::About, &ctx);
+        assert!(app.about_open);
+    }
+
+    /// What the menu greys out, which on macOS is the only signal that an
+    /// action is unavailable: there is no button to look at.
+    #[test]
+    fn menu_state_follows_the_app() {
+        let mut app = fixture();
+        let state = app.menu_state();
+        assert!(state.can_act, "an idle app can act");
+        assert!(!state.can_undo, "nothing has been removed yet");
+        assert!(state.on_servers);
+        assert!(!state.has_checked);
+        assert!(!state.has_search);
+
+        app.scanning = true;
+        assert!(!app.menu_state().can_act, "a scan blocks the actions");
+        app.scanning = false;
+        app.busy = Some("removing".into());
+        assert!(!app.menu_state().can_act, "a purge blocks the actions");
+        app.busy = None;
+
+        app.tab = Tab::Orphans;
+        app.search = "rea".into();
+        app.checked.insert("k".into());
+        let state = app.menu_state();
+        assert!(!state.on_servers);
+        assert!(state.has_search);
+        assert!(state.has_checked);
+        assert_eq!(state.tab, Tab::Orphans);
     }
 
     /// Ticking a row for a batch must not also select it: the tick box sits

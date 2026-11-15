@@ -8,7 +8,8 @@ A single self-contained binary for macOS, Windows and Linux. No webview, no
 Node toolchain.
 
 ```
-┌ Edit  View  Window  Help ──────────────────────────────────────┐
+                    ⌘ mcpurge  Edit  View  Window  Help   ← macOS: up there
+┌────────────────────────────────────────────────────────────────┐
 │ mcpurge  [Rescan]  42 servers · 6 running · 213 MB reclaimable │
 │ Servers | Orphans (1) | Coverage      filter [all ▾] [search] │
 ├────────────────────────────────────────┬─ Detail ─────────────┤
@@ -135,12 +136,51 @@ Removals are reflected immediately: a server whose config was removed leaves
 the table there and then, and a process confirmed dead stops being shown as
 running, without waiting for the next scan.
 
+### Menus
+
+On macOS the menus are the system's own, in the bar at the top of the screen,
+because that is where a Mac keeps them: an app that draws Edit/View/Window/Help
+inside its own window looks like a port of something else. egui cannot draw
+there — that bar is an `NSMenu` owned by `NSApplication` — so the native menu is
+built with `muda` and the in-window bar is not drawn at all. Windows and Linux
+keep the in-window bar, which is where those platforms expect it.
+
+Both bars run the same list of actions (`MenuAction`), so an item means the same
+thing in either, and the half that cannot be seen on the platform you are
+building on is still covered by tests.
+
+Menu shortcuts are deliberately few: ⌘F to find, ⌘R to rescan, ⌘1/⌘2/⌘3 for the
+tabs. A macOS menu accelerator is handled before the window sees the key, so
+⌘Z on "Undo last removal" would undo a *removal* while you were expecting to
+undo a word in the search box, and ⌘A would select every server instead of the
+text you were typing. Those two items have no shortcut.
+
 ### Theme
 
 Taupe, in a light and a dark variant, under **View > Theme**; `Follow system`
 tracks the desktop. The choice is remembered between runs. Both palettes are
 checked by test: body text clears WCAG AA (4.5:1) on every surface it is drawn
 on, and the status inks and selection text clear 3:1.
+
+### Every invented word explains itself
+
+mcpurge prints verdicts in words it made up: a server is `protected`, a path is
+`kept`, a process match is `probable`. Each one says on hover what it is *and*
+why it is there, and every column heading does the same. `protected`, for
+instance, answers the question it begs:
+
+> protected: mcpurge found files for this server but will not delete any of
+> them. A path is protected when deleting it would take something other than
+> this server with it: your own work handed to the server as an argument, a
+> system or package-manager directory, an installed application, or a cache
+> shared by every tool that uses the same package manager. Open the server to
+> see each path and the rule that kept it.
+
+The explanations for a domain type live on the type (`ArtifactKind::explain`,
+`Transport::explain`, `Scope::explain`, `MatchConfidence::explain`) rather than
+in the widget that happens to draw it, and a test hovers `protected` in the real
+table and reads the tooltip back, so a label that lost its explanation fails the
+build rather than quietly becoming jargon again.
 
 ### The three tabs
 
@@ -231,7 +271,7 @@ Critical fixes that ship without an advisory are caught separately by a daily
 ## Development
 
 ```sh
-cargo test --all                              # 87 tests
+cargo test --all                              # 107 tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo deny check advisories licenses bans sources
@@ -248,7 +288,10 @@ and drives real pointer input through the real widget tree with `egui_kittest`
 renders correctly and ignores input looks identical to a passing render test —
 see below. Another renders every view with the missing-glyph policy set to panic
 (`every_view_renders_with_real_fonts`), which is how a character the bundled
-fonts lack gets caught before it ships as an empty box. The config rewriter is
+fonts lack gets caught before it ships as an empty box. A third hovers `protected` in the
+real table and reads the tooltip that comes up
+(`hovering_protected_explains_what_it_means`), because an explanation nobody
+wired to a widget is not an explanation. The config rewriter is
 checked for comment preservation, dangling commas, deeply nested pointers and
 byte-identical sibling tokens; the process matcher against the real
 `npx` → `npm exec` wrapper chain; and there are named regression tests for the

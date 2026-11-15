@@ -61,3 +61,13 @@ strip = true
 # features off: the snapshot/wgpu extras would pull in a GPU stack we do not
 # need, and this adds only kittest and accesskit_consumer.
 egui_kittest = { version = "0.37.0", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The macOS menu bar is an NSMenu owned by NSApplication, which egui cannot
+# draw into, so the menus are built natively here and the in-window menu bar is
+# skipped. muda is Tauri's menu library and the maintained way to do this from
+# Rust. Latest stable (0.21.2), verified against the crates.io index on
+# 2026-11-15; no LTS track. Default features off and macOS only: it adds just
+# crossbeam-channel and keyboard-types, and nothing at all to the Windows and
+# Linux builds, which keep the in-window menu bar.
+muda = { version = "0.21.2", default-features = false }

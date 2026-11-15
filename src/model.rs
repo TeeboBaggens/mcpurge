@@ -43,6 +43,30 @@ impl Transport {
     pub fn is_local(&self) -> bool {
         matches!(self, Transport::Stdio { .. })
     }
+
+    /// How the client reaches the server, and whether that means a process on
+    /// this machine at all.
+    pub fn explain(&self) -> &'static str {
+        match self {
+            Transport::Stdio { .. } => {
+                "stdio: the client launches the server as a local process and talks to it \
+                 over its standard input and output. This is the kind mcpurge can stop."
+            }
+            Transport::Http { .. } => {
+                "http: the client calls a URL. Nothing runs on this machine unless you \
+                 started it yourself, so there is no process to stop."
+            }
+            Transport::Sse { .. } => {
+                "sse: the client calls a URL and reads server-sent events. Nothing runs on \
+                 this machine unless you started it yourself."
+            }
+            Transport::Unknown => {
+                "the config declares this server in a shape mcpurge does not recognise, so \
+                 how the client reaches it is unknown. It is listed anyway rather than \
+                 silently dropped."
+            }
+        }
+    }
 }
 
 /// Which config file a server came from, and where inside it.
@@ -114,6 +138,30 @@ pub enum Scope {
     /// Machine-wide / system config.
     System,
     Unknown,
+}
+
+impl Scope {
+    /// Who the entry applies to. The distinction matters before removing one:
+    /// a user-scope entry is gone from every project at once.
+    pub fn explain(&self) -> &'static str {
+        match self {
+            Scope::User => {
+                "user scope: declared in your own config, so this client offers the server \
+                 everywhere. Removing it removes it everywhere."
+            }
+            Scope::Project(_) => {
+                "project scope: declared for one project or workspace, and offered only \
+                 while working there."
+            }
+            Scope::System => {
+                "system scope: declared machine-wide, so it applies to every user account \
+                 on this computer."
+            }
+            Scope::Unknown => {
+                "mcpurge could not tell who this entry applies to from where it was found."
+            }
+        }
+    }
 }
 
 impl fmt::Display for Scope {
@@ -189,6 +237,27 @@ pub enum MatchConfidence {
 }
 
 impl MatchConfidence {
+    /// Why this process was tied to this config entry, and how much to trust
+    /// it. Attribution is inference, and the UI says so rather than implying a
+    /// certainty it does not have.
+    pub fn explain(self) -> &'static str {
+        match self {
+            MatchConfidence::Strong => {
+                "strong match: the running command is the one the config declares, down to an \
+                 absolute path or a distinctive argument. Stopping it stops this server."
+            }
+            MatchConfidence::Probable => {
+                "probable match: the command name agrees, or some of the arguments do. Two \
+                 servers launched the same way can look alike, so check the command line \
+                 below before stopping it."
+            }
+            MatchConfidence::Loose => {
+                "loose match: this looks like an MCP server but ties to no config entry. That \
+                 is what makes it an orphan."
+            }
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             MatchConfidence::Loose => "loose",
@@ -230,6 +299,42 @@ pub enum ArtifactKind {
 }
 
 impl ArtifactKind {
+    /// What this kind of path is, and what that means for deleting it.
+    ///
+    /// The UI shows a one-word label; this is the sentence behind it, so the
+    /// explanation lives next to the thing it explains rather than in the
+    /// widget that happens to draw it.
+    pub fn explain(self) -> &'static str {
+        match self {
+            ArtifactKind::NpmCache => {
+                "the npm/npx cache directory for this package. Deleting it only costs a \
+                 re-download the next time the server starts."
+            }
+            ArtifactKind::UvCache => {
+                "the uv/uvx cache or tool environment for this package. Deleting it only \
+                 costs a re-download, unless it is the cache shared by every uv tool on \
+                 the machine, in which case it is kept."
+            }
+            ArtifactKind::Venv => {
+                "a Python virtualenv created for this server. Deleting it costs a \
+                 reinstall of its packages."
+            }
+            ArtifactKind::LocalExecutable => {
+                "a script or binary the config launches directly. It may be something you \
+                 wrote, so look before deleting it."
+            }
+            ArtifactKind::DataPath => {
+                "a directory the server was granted access to, named in its own arguments. \
+                 This is your work, not the server's, so it is never deleted."
+            }
+            ArtifactKind::SourceDir => {
+                "a checked-out source directory the server runs from. It may hold \
+                 uncommitted work."
+            }
+            ArtifactKind::Other => "a path that belongs to this server but fits no other category.",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             ArtifactKind::NpmCache => "npm cache",

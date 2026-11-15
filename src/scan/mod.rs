@@ -379,9 +379,7 @@ mod tests {
         let home = dirs::home_dir().expect("home dir");
         assert!(!is_project_root_candidate(&home));
         assert!(!is_project_root_candidate(Path::new("/")));
-        assert!(is_project_root_candidate(
-            &home.join("development/projects/x")
-        ));
+        assert!(is_project_root_candidate(&home.join("development/apps/x")));
     }
 
     #[test]
