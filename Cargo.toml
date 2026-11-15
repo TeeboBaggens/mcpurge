@@ -53,3 +53,11 @@ thiserror = "2.0.21"
 opt-level = 2
 lto = "thin"
 strip = true
+
+[dev-dependencies]
+# Drives real pointer input through the real widget tree, which is the only way
+# to catch a widget that renders but does not respond. Latest stable, verified
+# against the crates.io index on 2026-11-13; it tracks egui's version. Default
+# features off: the snapshot/wgpu extras would pull in a GPU stack we do not
+# need, and this adds only kittest and accesskit_consumer.
+egui_kittest = { version = "0.37.0", default-features = false }
