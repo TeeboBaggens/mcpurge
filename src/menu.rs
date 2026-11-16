@@ -37,6 +37,10 @@ pub struct MenuState {
     pub reveal_env: bool,
     pub sweep: bool,
     pub measure: bool,
+    /// Look for a new release on launch.
+    pub auto_update_check: bool,
+    /// A check or a download is in flight, so the item is greyed out.
+    pub update_busy: bool,
 }
 
 pub use imp::NativeMenu;
@@ -74,6 +78,8 @@ mod imp {
         pub const SWEEP: &str = "view.sweep";
         pub const MEASURE: &str = "view.measure";
         pub const RESCAN: &str = "view.rescan";
+        pub const CHECK_UPDATES: &str = "help.check-updates";
+        pub const AUTO_UPDATES: &str = "help.auto-updates";
         pub const BACKUPS: &str = "help.backups";
         pub const REGISTRY: &str = "help.registry";
         pub const PROJECT: &str = "help.project";
@@ -101,6 +107,8 @@ mod imp {
             ids::SWEEP => MenuAction::ToggleSweep,
             ids::MEASURE => MenuAction::ToggleMeasure,
             ids::RESCAN => MenuAction::Rescan,
+            ids::CHECK_UPDATES => MenuAction::CheckForUpdates,
+            ids::AUTO_UPDATES => MenuAction::ToggleAutoUpdateCheck,
             ids::BACKUPS => MenuAction::OpenBackups,
             ids::REGISTRY => MenuAction::ShowRegistryPath,
             ids::PROJECT => MenuAction::ProjectPage,
@@ -138,6 +146,8 @@ mod imp {
         find: MenuItem,
         clear_search: MenuItem,
         rescan: MenuItem,
+        check_updates: MenuItem,
+        auto_updates: CheckMenuItem,
         tabs: Vec<(Tab, CheckMenuItem)>,
         themes: Vec<(ThemeMode, CheckMenuItem)>,
         show_disabled: CheckMenuItem,
@@ -277,6 +287,8 @@ mod imp {
             )
             .ok()?;
 
+            let check_updates = item(ids::CHECK_UPDATES, "Check for Updates\u{2026}", None);
+            let auto_updates = check(ids::AUTO_UPDATES, "Check for Updates on Launch", None);
             let backups = item(ids::BACKUPS, "Open backups folder", None);
             let registry = item(ids::REGISTRY, "Show the client registry location", None);
             let project = item(ids::PROJECT, "Project page", None);
@@ -284,7 +296,10 @@ mod imp {
                 "Help",
                 true,
                 &[
-                    &backups as &dyn muda::IsMenuItem,
+                    &check_updates as &dyn muda::IsMenuItem,
+                    &auto_updates,
+                    &PredefinedMenuItem::separator(),
+                    &backups,
                     &registry,
                     &PredefinedMenuItem::separator(),
                     &project,
@@ -322,6 +337,8 @@ mod imp {
                 find,
                 clear_search,
                 rescan,
+                check_updates,
+                auto_updates,
                 tabs,
                 themes,
                 show_disabled,
@@ -354,6 +371,8 @@ mod imp {
             self.find.set_enabled(state.on_servers);
             self.clear_search.set_enabled(state.has_search);
             self.rescan.set_enabled(state.can_act);
+            self.check_updates.set_enabled(!state.update_busy);
+            self.auto_updates.set_checked(state.auto_update_check);
 
             for (tab, item) in &self.tabs {
                 item.set_checked(*tab == state.tab);
@@ -393,6 +412,8 @@ mod imp {
                 ids::SWEEP,
                 ids::MEASURE,
                 ids::RESCAN,
+                ids::CHECK_UPDATES,
+                ids::AUTO_UPDATES,
                 ids::BACKUPS,
                 ids::REGISTRY,
                 ids::PROJECT,

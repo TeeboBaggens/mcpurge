@@ -1,0 +1,7 @@
+This file exists to prove that the public key committed at
+assets/release-signing-key.pub is the key that actually signs mcpurge
+releases, and that the verifier in src/update.rs accepts a real signature
+made by the minisign tool rather than only ones it produced itself.
+
+Regenerate it and its signatures with scripts/sign-release-fixture.sh if the
+release signing key is ever rotated.

@@ -92,7 +92,81 @@ them `kept`.
 - **Every destructive action is confirmed** with the exact PIDs, files and
   config keys it will touch.
 
+## Updating itself
+
+mcpurge can replace itself with a newer release, under rules that match what it
+does to everything else: nothing happens without being asked, and nothing is
+accepted that cannot be verified.
+
+- **Signed, or not installed.** Every release binary carries a detached
+  [minisign](https://jedisct1.github.io/minisign/) signature made by the
+  mcpurge release key, and the matching public key is compiled into the binary
+  rather than fetched. The signature is checked in memory, before a byte is
+  written anywhere executable. A download that does not verify is discarded.
+
+  ```
+  Release signing key  RWS19zuWF/iFDqf71bMLPIPVNIR8XHNawsUJNNAN1nMJvFbC8ySb3LdI
+  Key ID               0E85F817963BF7B5
+  ```
+
+  The same key ID is in **Help > About mcpurge**, in
+  `assets/release-signing-key.pub`, and in `SIGNING_KEY_ID` in `src/update.rs`.
+  Releases can be checked by hand without running mcpurge at all:
+
+  ```sh
+  brew install minisign   # or: sudo apt install minisign
+  minisign -V -H -P RWS19zuWF/iFDqf71bMLPIPVNIR8XHNawsUJNNAN1nMJvFbC8ySb3LdI \
+           -m mcpurge-aarch64-apple-darwin
+  ```
+
+- **Ed25519, by format rather than by policy.** minisign has one algorithm, so
+  there is no field in a signature to talk the verifier down to something
+  weaker. This is why the updater brings in no cryptographic dependency tree
+  worth speaking of: `minisign-verify` has no dependencies at all, and
+  `cargo deny check advisories` passes with no exceptions. An earlier draft
+  used OpenPGP, which meant compiling an RSA implementation — and carrying its
+  two open timing advisories — to verify signatures that were never RSA.
+
+- **Three signatures are checked, not one.** The Ed25519 signature over the
+  download's BLAKE2b hash, a second one covering that signature together with
+  the release's trusted comment, and the key ID matching the built-in key. The
+  trusted comment names the version and file, so a valid signature cannot be
+  moved onto a different download.
+
+- **Checking is a toggle; installing never is.** **Help > Check for updates on
+  launch** controls the one network request mcpurge makes. Turn it off and the
+  app talks to nothing at all unless you pick **Check for updates…** yourself.
+  Finding a release only opens a window that names the version and asks.
+
+- **It will not overwrite a build.** Running from `target/release` during
+  development is normal; replacing that binary would clobber your build output,
+  so an install from a cargo target directory is declined with an explanation.
+
+Releases are built and signed by `.github/workflows/release.yml` on a `v*` tag,
+which refuses to publish if the tag and `Cargo.toml` disagree, and verifies each
+signature against the public key committed here — with the same `-H` the app
+insists on — before uploading anything. That verification step is where the
+committed public key and the signing key are proved to be a pair.
+
 ## Install
+
+Download the binary for your platform from the
+[latest release](https://github.com/TeeboBaggens/mcpurge/releases/latest),
+check its signature, and put it somewhere on your `PATH`:
+
+```sh
+brew install minisign   # or: sudo apt install minisign
+minisign -V -H -P RWS19zuWF/iFDqf71bMLPIPVNIR8XHNawsUJNNAN1nMJvFbC8ySb3LdI \
+         -m mcpurge-aarch64-apple-darwin
+chmod +x mcpurge-aarch64-apple-darwin
+```
+
+`-H` insists the signature is over a hash of the file rather than the file
+itself, which is the only form mcpurge's own verifier accepts.
+
+After that mcpurge keeps itself up to date — see [Updating itself](#updating-itself).
+
+### From source
 
 Requires Rust stable (pinned in `rust-toolchain.toml`).
 
@@ -107,8 +181,11 @@ On Linux, the GUI needs the usual X11/Wayland dev packages:
 
 ```sh
 sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev \
-  libxcb-xfixes0-dev libxkbcommon-dev
+  libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
 ```
+
+`libssl-dev` is there for the updater: it uses the platform's own TLS rather
+than bundling a copy of Mozilla's root store, so on Linux that means OpenSSL.
 
 ## Usage
 
@@ -271,7 +348,7 @@ Critical fixes that ship without an advisory are caught separately by a daily
 ## Development
 
 ```sh
-cargo test --all                              # 107 tests
+cargo test --all                              # 128 tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo deny check advisories licenses bans sources

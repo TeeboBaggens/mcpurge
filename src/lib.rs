@@ -11,6 +11,7 @@
 //! * [`purge`]   - backup, surgical config edits, trash.
 //! * [`theme`]   - the taupe palettes, light and dark.
 //! * [`menu`]    - the menu bar, native on macOS and in-window elsewhere.
+//! * [`update`]  - the signed self-updater.
 //! * [`app`]     - the egui front end.
 
 pub mod app;
@@ -22,3 +23,4 @@ pub mod purge;
 pub mod registry;
 pub mod scan;
 pub mod theme;
+pub mod update;

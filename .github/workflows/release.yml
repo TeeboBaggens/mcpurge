@@ -1,0 +1,170 @@
+# Cut a release: build the binaries, sign them with the mcpurge release key,
+# and publish both to a GitHub release.
+#
+# The self-updater in src/update.rs will install nothing that this workflow did
+# not sign, so the signing step is not decoration: a release published without
+# it is a release no mcpurge will accept.
+#
+# Action versions were the latest releases on 2026-11-15.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # A tag that disagrees with Cargo.toml would publish a binary that reports a
+  # different version than the release it came from, and the updater compares
+  # exactly those two numbers. Cheapest possible job, and it gates the rest.
+  check-version:
+    name: tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compare the tag with the crate version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          echo "tag=$tag crate=$crate"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $crate"
+            exit 1
+          fi
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: check-version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            # macos-latest runners are arm64, so this build cannot run its own
+            # tests. Everything else can, and does.
+            cross: true
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Linux GUI build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Test
+        if: ${{ !matrix.cross }}
+        run: cargo test --all
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Name the binary after its target
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/mcpurge.exe" \
+               "dist/mcpurge-${{ matrix.target }}.exe"
+          else
+            cp "target/${{ matrix.target }}/release/mcpurge" \
+               "dist/mcpurge-${{ matrix.target }}"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mcpurge-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: sign and publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      # minisign 0.11-1 in noble's universe repository, which is enabled on
+      # the GitHub-hosted runners.
+      - name: Install minisign
+        run: sudo apt-get update && sudo apt-get install -y minisign
+
+      - name: Sign every binary with the release key
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          set -eu
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::error::MINISIGN_SECRET_KEY is not set, so nothing could be signed"
+            exit 1
+          fi
+          # The key lives in a throwaway directory for the length of this step,
+          # so it never lands in ~/.minisign and goes away with the runner.
+          keydir="$(mktemp -d)"
+          chmod 700 "$keydir"
+          trap 'rm -rf "$keydir"' EXIT
+          (umask 077; printf '%s\n' "$MINISIGN_SECRET_KEY" > "$keydir/release.key")
+
+          for file in dist/mcpurge-*; do
+            case "$file" in *.minisig) continue;; esac
+            # The trusted comment is signed too, so naming the release in it
+            # means a signature cannot be lifted onto another file or version.
+            printf '%s\n' "$MINISIGN_PASSWORD" |
+              minisign -S -s "$keydir/release.key" -m "$file" \
+                       -t "mcpurge ${GITHUB_REF_NAME#v} $(basename "$file")"
+          done
+
+          # Verify against the public key committed to the repo, not the secret
+          # key we just used: that committed key is the one compiled into the
+          # shipped binaries, and this is where the two are proved to be a pair.
+          # A mismatch fails the release instead of publishing a build that no
+          # mcpurge would accept.
+          #
+          # -H insists the signature is over a hash rather than the file, which
+          # is what src/update.rs insists on too. Signing is prehashed by
+          # default, so this is here to catch the day that stops being true in
+          # whatever minisign the runner has - a legacy signature would verify
+          # fine with plain -V and then be refused by every installed mcpurge.
+          for file in dist/mcpurge-*; do
+            case "$file" in *.minisig) continue;; esac
+            minisign -V -H -p assets/release-signing-key.pub -m "$file"
+          done
+          ls -l dist
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "mcpurge ${GITHUB_REF_NAME#v}" \
+            --generate-notes \
+            --verify-tag \
+            dist/*

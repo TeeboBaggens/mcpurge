@@ -48,6 +48,38 @@ open = "5.4.5"
 # Errors.
 anyhow = "1.0.104"
 thiserror = "2.0.21"
+# The self-updater. All four are the latest stable releases, verified against
+# the crates.io index on 2026-11-15; none publish an LTS track.
+#
+# ureq is the smallest HTTP client that is not an async runtime, and the
+# updater makes two requests. It is pinned to the platform's own TLS -
+# Security.framework, SChannel, OpenSSL - rather than its default rustls stack:
+# that keeps `ring` and its OpenSSL-licensed files out of the tree, so the
+# cargo-deny licence allow-list stays as it is, and it means certificate trust
+# follows the machine rather than a bundled root store.
+ureq = { version = "3.5.2", default-features = false, features = [
+    # Not "native-tls": that also pulls in a bundled copy of the Mozilla root
+    # store. The point of using the platform's TLS is that trust follows the
+    # machine, and a second set of roots in the binary would quietly undo that.
+    "native-tls-no-default",
+    "gzip",
+] }
+# Verifies the detached minisign signature on a download, and nothing else:
+# Ed25519 over a BLAKE2b hash, no key generation, no secret-key handling, no
+# other algorithm in the format. It has no dependencies of its own at all -
+# the whole crate is six files - which is why the updater adds no transitive
+# crates to the tree and `cargo deny check advisories` needs no exceptions.
+#
+# This replaced rpgp: OpenPGP is one format with many algorithms, so a verifier
+# that only ever wants Ed25519 still had to compile the RSA implementation and
+# carry its two open timing advisories. minisign has one algorithm, so the
+# narrowing is the format rather than a runtime check.
+minisign-verify = "0.3.0"
+# Replacing a running executable is three different problems on three
+# platforms (Windows will not let you unlink a running image). This is the
+# crate that already solved all three.
+self-replace = "1.5.1"
+semver = "1.0.28"
 
 [profile.release]
 opt-level = 2
