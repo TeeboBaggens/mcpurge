@@ -348,7 +348,7 @@ Critical fixes that ship without an advisory are caught separately by a daily
 ## Development
 
 ```sh
-cargo test --all                              # 127 tests
+cargo test --all                              # 128 tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo deny check advisories licenses bans sources

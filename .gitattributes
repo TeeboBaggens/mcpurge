@@ -1,0 +1,14 @@
+# Signed data has to survive a checkout byte for byte.
+#
+# A minisign signature covers the exact bytes of the file it was made over, so
+# a checkout that rewrites line endings - which is what git does by default on
+# Windows - produces a file its own signature no longer matches. These are the
+# files where that matters, and `-text` tells git to leave them alone.
+#
+# This is not hypothetical: it failed on the Windows runner and nowhere else,
+# and it failed in a way that looked like a bad signature rather than a bad
+# checkout. The negative tests all still passed there, because a fixture that
+# cannot verify is exactly what they expect to see.
+tests/fixtures/signed-message.txt    -text
+tests/fixtures/*.minisig             -text
+assets/release-signing-key.pub       -text

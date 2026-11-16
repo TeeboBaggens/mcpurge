@@ -461,6 +461,21 @@ mod tests {
         );
     }
 
+    /// A named failure for the thing that actually went wrong the first time
+    /// this ran on Windows: git rewrote the fixture's line endings on
+    /// checkout, so the file no longer matched its own signature. That shows
+    /// up as "signature verification failed", which sends you looking at the
+    /// key. `.gitattributes` marks these files `-text`; this is the test that
+    /// says so if some other git translates them anyway.
+    #[test]
+    fn the_signed_fixture_survived_the_checkout_unaltered() {
+        assert!(
+            !FIXTURE.contains('\r'),
+            "the fixture has CRLF line endings, so it is no longer the data that \
+             was signed - check that .gitattributes marks it -text"
+        );
+    }
+
     /// The one that ties the repo to the key: these bytes were signed by the
     /// private half, so this passing means the committed public half is its
     /// pair. It is also what proves releases are signed in the pre-hashed
