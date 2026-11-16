@@ -67,8 +67,22 @@ jobs:
             libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+
+      # rust-toolchain.toml pins the compiler, and that pin beats whatever the
+      # action above installs - so asking the action for a target added it to
+      # *stable*, while cargo went on running the pinned toolchain without it.
+      # The three host-native builds never noticed, because std for the host is
+      # always present; the cross build failed with "can't find crate for std".
+      #
+      # `rustup toolchain install` with no argument installs the toolchain
+      # rust-toolchain.toml names, which keeps the pin in one place, and
+      # `rustup target add` then lands on that toolchain rather than on stable.
+      - name: Add this target to the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
+          rustup show
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
