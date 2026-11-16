@@ -173,12 +173,45 @@ jobs:
           done
           ls -l dist
 
+      # A release can already exist before this job runs - drafted by hand ahead
+      # of the tag, or left behind by an earlier attempt that failed in `build`
+      # and so never reached this step. `gh release create` refuses outright in
+      # that case, which would mean the signed binaries exist on the runner and
+      # nowhere else, so uploading into the existing release is the path that
+      # actually publishes them. It also makes a re-run after a failure work
+      # without deleting anything: --clobber replaces the assets of the same
+      # name rather than erroring on them.
+      #
+      # The two paths differ in what they own. Creating sets the title and the
+      # notes; uploading touches assets only, and leaves whatever notes the
+      # release already has alone, because a release published by hand is
+      # presumed to say what its author meant it to say.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "mcpurge ${GITHUB_REF_NAME#v}" \
-            --generate-notes \
-            --verify-tag \
-            dist/*
+          set -eu
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME exists; uploading the signed binaries into it"
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "mcpurge ${GITHUB_REF_NAME#v}" \
+              --generate-notes \
+              --verify-tag \
+              dist/*
+          fi
+
+          # Whichever path ran, the release is only a release if the signatures
+          # arrived with the binaries: an mcpurge that finds a binary without a
+          # .minisig next to it refuses the update and says the release is
+          # unsigned. Count them here rather than discover it from a user.
+          binaries=$(gh release view "$GITHUB_REF_NAME" --json assets \
+                       --jq '[.assets[].name | select(endswith(".minisig") | not)] | length')
+          signatures=$(gh release view "$GITHUB_REF_NAME" --json assets \
+                       --jq '[.assets[].name | select(endswith(".minisig"))] | length')
+          echo "published $binaries binaries and $signatures signatures"
+          if [ "$binaries" -eq 0 ] || [ "$binaries" -ne "$signatures" ]; then
+            echo "::error::$binaries binaries but $signatures signatures on $GITHUB_REF_NAME"
+            exit 1
+          fi
