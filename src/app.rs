@@ -304,7 +304,10 @@ mod help {
     pub const UPDATE_INSTALL: &str = "The download is checked against the mcpurge release \
                                       signing key, which is built into this binary, before \
                                       anything is written. A download that is not signed by \
-                                      that key is discarded.";
+                                      that key is discarded.\n\nThe signatures are minisign \
+                                      ones, so you can check a release by hand with the \
+                                      minisign tool; the full public key is in the project's \
+                                      README.";
     pub const TAB_SERVERS: &str = "every MCP server declared by a config file on this machine.";
     pub const TAB_ORPHANS: &str = "processes that look like MCP servers but match no config \
                                    entry: left running after their config was edited away, or \
@@ -1407,14 +1410,11 @@ impl McpurgeApp {
                         "off - checked only when you ask"
                     }
                 ));
-                // The fingerprint is here so it can be compared against the
-                // one published in the repository. A verifier whose key nobody
-                // can check is a verifier you have to take on faith.
-                ui.weak(format!(
-                    "Releases signed by {}",
-                    update::SIGNING_KEY_FINGERPRINT
-                ))
-                .on_hover_text(help::UPDATE_INSTALL);
+                // The key ID is here so it can be compared against the one
+                // published in the repository. A verifier whose key nobody can
+                // check is a verifier you have to take on faith.
+                ui.weak(format!("Releases signed by {}", update::SIGNING_KEY_ID))
+                    .on_hover_text(help::UPDATE_INSTALL);
                 ui.add_space(8.0);
                 ui.weak("MIT OR Apache-2.0");
             });
@@ -3523,9 +3523,36 @@ mod tests {
             tag: "v9.9.9".into(),
             notes: "- Something worth having\n- Something else\n".into(),
             binary_url: "https://example.test/mcpurge".into(),
-            signature_url: "https://example.test/mcpurge.asc".into(),
+            signature_url: "https://example.test/mcpurge.minisig".into(),
             size_bytes: 8_471_232,
         }
+    }
+
+    /// The About box is where someone compares the key mcpurge verifies with
+    /// against the one published in the README, so the key ID has to actually
+    /// be on screen. Nothing else in the app would notice if it stopped being.
+    #[test]
+    fn the_about_box_shows_the_signing_key() {
+        use egui_kittest::kittest::Queryable as _;
+
+        let mut app = fixture();
+        app.about_open = true;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .build_ui_state(
+                |ui, app: &mut McpurgeApp| {
+                    let ctx = ui.ctx().clone();
+                    app.about_window(&ctx);
+                },
+                app,
+            );
+        harness.run();
+        assert!(
+            harness
+                .query_by_label_contains(update::SIGNING_KEY_ID)
+                .is_some(),
+            "the About box does not name the release signing key"
+        );
     }
 
     /// The updater's two windows, drawn through the real font stack: the offer

@@ -111,36 +111,52 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # minisign 0.11-1 in noble's universe repository, which is enabled on
+      # the GitHub-hosted runners.
+      - name: Install minisign
+        run: sudo apt-get update && sudo apt-get install -y minisign
+
       - name: Sign every binary with the release key
         env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
         run: |
           set -eu
-          if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
-            echo "::error::GPG_PRIVATE_KEY is not set, so nothing could be signed"
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::error::MINISIGN_SECRET_KEY is not set, so nothing could be signed"
             exit 1
           fi
-          # A throwaway keyring in the runner's workspace, so nothing is left
-          # in the default one and the key material never touches $HOME.
-          export GNUPGHOME="$(mktemp -d)"
-          chmod 700 "$GNUPGHOME"
-          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --quiet --import
+          # The key lives in a throwaway directory for the length of this step,
+          # so it never lands in ~/.minisign and goes away with the runner.
+          keydir="$(mktemp -d)"
+          chmod 700 "$keydir"
+          trap 'rm -rf "$keydir"' EXIT
+          (umask 077; printf '%s\n' "$MINISIGN_SECRET_KEY" > "$keydir/release.key")
+
           for file in dist/mcpurge-*; do
-            case "$file" in *.asc) continue;; esac
-            gpg --batch --quiet --yes --pinentry-mode loopback \
-                --passphrase "$GPG_PASSPHRASE" \
-                --armor --detach-sign --output "$file.asc" "$file"
+            case "$file" in *.minisig) continue;; esac
+            # The trusted comment is signed too, so naming the release in it
+            # means a signature cannot be lifted onto another file or version.
+            printf '%s\n' "$MINISIGN_PASSWORD" |
+              minisign -S -s "$keydir/release.key" -m "$file" \
+                       -t "mcpurge ${GITHUB_REF_NAME#v} $(basename "$file")"
           done
-          # Verify against the public key committed to the repo, not against
-          # the keyring we just imported: that is the key the shipped binaries
-          # check signatures with, and this is where the two are proved equal.
-          verify_home="$(mktemp -d)"
-          GNUPGHOME="$verify_home" gpg --batch --quiet --import assets/release-signing-key.asc
-          for sig in dist/*.asc; do
-            GNUPGHOME="$verify_home" gpg --batch --verify "$sig" "${sig%.asc}"
+
+          # Verify against the public key committed to the repo, not the secret
+          # key we just used: that committed key is the one compiled into the
+          # shipped binaries, and this is where the two are proved to be a pair.
+          # A mismatch fails the release instead of publishing a build that no
+          # mcpurge would accept.
+          #
+          # -H insists the signature is over a hash rather than the file, which
+          # is what src/update.rs insists on too. Signing is prehashed by
+          # default, so this is here to catch the day that stops being true in
+          # whatever minisign the runner has - a legacy signature would verify
+          # fine with plain -V and then be refused by every installed mcpurge.
+          for file in dist/mcpurge-*; do
+            case "$file" in *.minisig) continue;; esac
+            minisign -V -H -p assets/release-signing-key.pub -m "$file"
           done
-          rm -rf "$GNUPGHOME" "$verify_home"
           ls -l dist
 
       - name: Publish the release

@@ -10,6 +10,12 @@
 //!    key is compiled into the binary, not fetched, so an attacker who controls
 //!    the download also has to have the private key. The signature is checked
 //!    in memory, before a single byte is written anywhere executable.
+//!
+//!    The format is [minisign](https://jedisct1.github.io/minisign/), which is
+//!    Ed25519 and nothing else - there is no algorithm field to be talked down
+//!    to something weaker. The same signature files can be checked by hand
+//!    with the `minisign` command, so the guarantee is not one you have to
+//!    take this module's word for.
 //! 2. **Nothing is installed without being asked.** The check can be automatic;
 //!    the install never is. There is no silent update path in this module, and
 //!    [`install`] is only ever reached from a button.
@@ -28,8 +34,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey};
-use pgp::crypto::public_key::PublicKeyAlgorithm;
+use minisign_verify::{PublicKey, Signature};
 use semver::Version;
 use serde::Deserialize;
 
@@ -37,11 +42,15 @@ use serde::Deserialize;
 ///
 /// Shipped in the binary rather than fetched, because a key you download from
 /// the same place as the file it vouches for vouches for nothing.
-pub const SIGNING_KEY: &str = include_str!("../assets/release-signing-key.asc");
+pub const SIGNING_KEY: &str = include_str!("../assets/release-signing-key.pub");
 
-/// The fingerprint [`SIGNING_KEY`] must have. Checked by a test, so swapping
-/// the key file without meaning to fails the build rather than the update.
-pub const SIGNING_KEY_FINGERPRINT: &str = "E5FD1E0C7E53CC1815F435833BE10A2EF8137679";
+/// The key ID [`SIGNING_KEY`] must carry. Checked by a test, so swapping the
+/// key file without meaning to fails the build rather than the update.
+pub const SIGNING_KEY_ID: &str = "0E85F817963BF7B5";
+
+/// The suffix minisign gives a detached signature, and so the name of the
+/// second asset every release has to carry.
+const SIGNATURE_SUFFIX: &str = ".minisig";
 
 const LATEST_RELEASE_API: &str =
     "https://api.github.com/repos/TeeboBaggens/mcpurge/releases/latest";
@@ -228,7 +237,7 @@ fn newer_than(release: &ReleaseJson, current: &Version) -> Result<Option<Availab
             std::env::consts::ARCH
         );
     };
-    let signature_name = format!("{name}.asc");
+    let signature_name = format!("{name}{SIGNATURE_SUFFIX}");
 
     let binary = release
         .assets
@@ -286,30 +295,38 @@ pub fn download_verified(available: &Available) -> Result<Vec<u8>> {
     Ok(binary)
 }
 
-/// Check a detached OpenPGP signature against the compiled-in release key.
+/// Check a detached minisign signature against the compiled-in release key.
 ///
-/// Only Ed25519 is accepted. The release key is an Ed25519 key, so nothing
-/// mcpurge publishes is signed any other way, and narrowing it here means the
-/// verifier never enters the RSA code in the OpenPGP library at all - which is
-/// what lets `deny.toml` dismiss the two RSA timing advisories honestly rather
-/// than by assertion. See the note there.
-pub fn verify(binary: &[u8], armored_signature: &str) -> Result<()> {
-    let (key, _) = SignedPublicKey::from_string(SIGNING_KEY)
-        .context("the built-in release signing key did not parse")?;
-    let (signature, _) = DetachedSignature::from_string(armored_signature)
-        .context("the downloaded signature did not parse")?;
+/// Three things have to hold, and the library checks all three: the signature
+/// was made by the key whose ID is in [`SIGNING_KEY`], the Ed25519 signature
+/// over the file's BLAKE2b hash is good, and a second Ed25519 signature covers
+/// the first one together with the trusted comment - so the comment cannot be
+/// rewritten either.
+///
+/// Legacy mode is refused (`allow_legacy: false`). minisign signed the file
+/// itself rather than a hash before version 0.8; nothing mcpurge publishes is
+/// in that format, and accepting it would mean a second code path through the
+/// verifier for no gain.
+pub fn verify(binary: &[u8], signature: &str) -> Result<()> {
+    let key = PublicKey::decode(SIGNING_KEY)
+        .map_err(|e| anyhow!("the built-in release signing key did not parse: {e}"))?;
+    let signature = Signature::decode(signature)
+        .map_err(|e| anyhow!("the downloaded signature did not parse: {e}"))?;
 
-    // EdDSALegacy is what GnuPG writes for a v4 Ed25519 key, which is what the
-    // release key is; Ed25519 is the RFC 9580 spelling, taken for the day that
-    // changes.
-    match signature.signature.config().map(|c| c.pub_alg) {
-        Some(PublicKeyAlgorithm::Ed25519 | PublicKeyAlgorithm::EdDSALegacy) => {}
-        other => bail!("the signature is {other:?}, and mcpurge releases are signed with Ed25519"),
-    }
-
-    signature
-        .verify(&key, binary)
-        .map_err(|e| anyhow!("the download is not signed by the mcpurge release key: {e}"))
+    // Each refusal says which of the three checks failed, because "signature
+    // invalid" on a download is the moment a user most needs to know whether
+    // they are looking at a broken mirror or a forgery.
+    key.verify(binary, &signature, false).map_err(|e| match e {
+        minisign_verify::Error::UnexpectedKeyId => anyhow!(
+            "the download is signed by a different key than the mcpurge release key \
+             ({SIGNING_KEY_ID})"
+        ),
+        minisign_verify::Error::UnexpectedAlgorithm => anyhow!(
+            "the signature is in minisign's legacy format, and mcpurge releases are \
+             signed in the pre-hashed one"
+        ),
+        e => anyhow!("the download is not signed by the mcpurge release key: {e}"),
+    })
 }
 
 /// Put verified bytes in place of the running executable.
@@ -360,14 +377,50 @@ pub fn install(binary: &[u8]) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pgp::types::KeyDetails as _;
 
     /// Signed with the real release key, so this also proves the key shipped
-    /// in the repo is the key that signs things. Regenerate both files with
-    /// `scripts/sign-release-fixture.sh` if the key is ever rotated.
+    /// in the repo is the key that signs things. Regenerate every fixture here
+    /// with `scripts/sign-release-fixture.sh` if the key is ever rotated.
     const FIXTURE: &str = include_str!("../tests/fixtures/signed-message.txt");
-    const FIXTURE_SIG: &str = include_str!("../tests/fixtures/signed-message.txt.asc");
+    const FIXTURE_SIG: &str = include_str!("../tests/fixtures/signed-message.txt.minisig");
+    /// The same file, signed by a key that is not the release key.
+    const FIXTURE_SIG_WRONG_KEY: &str =
+        include_str!("../tests/fixtures/signed-message.txt.wrong-key.minisig");
+    /// The same file, signed by the release key in minisign's legacy format.
+    const FIXTURE_SIG_LEGACY: &str =
+        include_str!("../tests/fixtures/signed-message.txt.legacy.minisig");
     const RELEASE_JSON: &str = include_str!("../tests/fixtures/release-latest.json");
+
+    /// A minisign signature file is four lines: a comment, the signature, the
+    /// trusted comment, and the signature over those last two together.
+    const SIGNATURE_LINE: usize = 1;
+    const TRUSTED_COMMENT_LINE: usize = 2;
+    const GLOBAL_SIGNATURE_LINE: usize = 3;
+
+    /// Alter one line of a signature file, leaving the rest intact.
+    fn with_line(signature: &str, index: usize, replacement: &str) -> String {
+        let mut lines: Vec<&str> = signature.lines().collect();
+        assert_eq!(lines.len(), 4, "not a minisign signature: {signature:?}");
+        lines[index] = replacement;
+        lines.join("\n")
+    }
+
+    /// Change one letter of a base64 line, which is enough to break whichever
+    /// signature it holds without making the file unparseable.
+    fn one_letter_changed(line: &str) -> String {
+        let mut out = String::with_capacity(line.len());
+        let mut changed = false;
+        for c in line.chars() {
+            if !changed && c.is_ascii_alphabetic() {
+                out.push(if c == 'A' { 'B' } else { 'A' });
+                changed = true;
+            } else {
+                out.push(c);
+            }
+        }
+        assert!(changed, "no letter to change in {line:?}");
+        out
+    }
 
     /// Not run by default: it talks to GitHub. Run it by hand with
     /// `cargo test -- --ignored` to prove the whole path works - TLS through
@@ -394,35 +447,24 @@ mod tests {
         assert!(asset_name().is_some(), "no asset name for this platform");
     }
 
+    /// A tripwire for the key file being replaced: minisign writes the key ID
+    /// into its comment line, so a different key is a different comment. It is
+    /// the cheap half of the check - `a_real_signature_verifies` is the half
+    /// that cannot be satisfied by editing text.
     #[test]
     fn the_built_in_key_is_the_release_key() {
-        let (key, _) = SignedPublicKey::from_string(SIGNING_KEY).expect("the key parses");
-        let fingerprint = key
-            .fingerprint()
-            .to_string()
-            .to_uppercase()
-            .replace([' ', '-'], "");
-        assert_eq!(
-            fingerprint, SIGNING_KEY_FINGERPRINT,
-            "the shipped public key is not the one this build expects"
-        );
-    }
-
-    /// The narrowing in `verify` only means anything if the real signature is
-    /// in fact Ed25519, so that is checked rather than assumed.
-    #[test]
-    fn the_release_signature_is_ed25519() {
-        let (signature, _) = DetachedSignature::from_string(FIXTURE_SIG).expect("parses");
-        let alg = signature.signature.config().map(|c| c.pub_alg);
+        PublicKey::decode(SIGNING_KEY).expect("the shipped key parses");
+        let comment = SIGNING_KEY.lines().next().unwrap_or_default();
         assert!(
-            matches!(
-                alg,
-                Some(PublicKeyAlgorithm::Ed25519 | PublicKeyAlgorithm::EdDSALegacy)
-            ),
-            "the release key signs with {alg:?}, which verify() will refuse"
+            comment.contains(SIGNING_KEY_ID),
+            "the shipped public key says {comment:?}, not {SIGNING_KEY_ID}"
         );
     }
 
+    /// The one that ties the repo to the key: these bytes were signed by the
+    /// private half, so this passing means the committed public half is its
+    /// pair. It is also what proves releases are signed in the pre-hashed
+    /// format, since `verify` refuses any other.
     #[test]
     fn a_real_signature_verifies() {
         verify(FIXTURE.as_bytes(), FIXTURE_SIG).expect("the fixture is signed by the release key");
@@ -441,31 +483,58 @@ mod tests {
         );
     }
 
-    /// The other half of the same rule: a signature that has been meddled
-    /// with is refused, whether it fails the armour's checksum or the maths.
+    /// A real signature over these exact bytes, made by a real Ed25519 key
+    /// that is not ours. Nothing about the file is malformed, so this is the
+    /// test that the *key* is what is being checked.
+    #[test]
+    fn a_signature_from_another_key_is_refused() {
+        let err = verify(FIXTURE.as_bytes(), FIXTURE_SIG_WRONG_KEY)
+            .expect_err("another key's signature must not verify");
+        assert!(
+            err.to_string().contains("different key"),
+            "unhelpful error: {err}"
+        );
+    }
+
+    /// Made by the release key, and still refused, because `verify` does not
+    /// accept the legacy format. Without this fixture the `allow_legacy: false`
+    /// argument would be untested.
+    #[test]
+    fn a_legacy_signature_is_refused() {
+        let err = verify(FIXTURE.as_bytes(), FIXTURE_SIG_LEGACY)
+            .expect_err("a legacy signature must not verify");
+        assert!(
+            err.to_string().contains("legacy format"),
+            "unhelpful error: {err}"
+        );
+    }
+
+    /// The trusted comment is the one piece of a signature a tool will print
+    /// back to a user, so it is covered by a signature of its own. Editing it
+    /// has to break the file.
+    #[test]
+    fn an_edited_trusted_comment_is_refused() {
+        let edited = with_line(
+            FIXTURE_SIG,
+            TRUSTED_COMMENT_LINE,
+            "trusted comment: mcpurge 99.0.0, definitely genuine",
+        );
+        assert!(verify(FIXTURE.as_bytes(), &edited).is_err());
+    }
+
+    /// Both signatures in the file, each refused on its own: the first covers
+    /// the download, the second covers the first.
     #[test]
     fn a_corrupted_signature_is_refused() {
-        let body: Vec<&str> = FIXTURE_SIG.lines().collect();
-        // Line 0 is the armour header, and the last two are the checksum and
-        // the footer, so the middle is signature payload.
-        let victim = body.len() / 2;
-        let mut corrupted = body.clone();
-        let flipped: String = body[victim]
-            .chars()
-            .map(|c| {
-                if c == 'a' {
-                    'b'
-                } else if c == 'b' {
-                    'a'
-                } else {
-                    c
-                }
-            })
-            .collect();
-        corrupted[victim] = &flipped;
-        let joined = corrupted.join("\n");
-        assert_ne!(joined, FIXTURE_SIG, "the fixture line was not altered");
-        assert!(verify(FIXTURE.as_bytes(), &joined).is_err());
+        for line in [SIGNATURE_LINE, GLOBAL_SIGNATURE_LINE] {
+            let original = FIXTURE_SIG.lines().nth(line).expect("the line is there");
+            let corrupted = with_line(FIXTURE_SIG, line, &one_letter_changed(original));
+            assert_ne!(corrupted, FIXTURE_SIG, "line {line} was not altered");
+            assert!(
+                verify(FIXTURE.as_bytes(), &corrupted).is_err(),
+                "a corrupted line {line} verified"
+            );
+        }
     }
 
     fn release() -> ReleaseJson {
@@ -480,7 +549,10 @@ mod tests {
         assert_eq!(found.version, Version::new(0, 2, 0));
         assert_eq!(found.tag, "v0.2.0");
         assert!(found.binary_url.ends_with(asset_name().unwrap()));
-        assert_eq!(found.signature_url, format!("{}.asc", found.binary_url));
+        assert_eq!(
+            found.signature_url,
+            format!("{}{SIGNATURE_SUFFIX}", found.binary_url)
+        );
     }
 
     #[test]
@@ -509,7 +581,7 @@ mod tests {
     #[test]
     fn an_unsigned_release_is_an_error() {
         let mut r = release();
-        r.assets.retain(|a| !a.name.ends_with(".asc"));
+        r.assets.retain(|a| !a.name.ends_with(SIGNATURE_SUFFIX));
         let err = newer_than(&r, &Version::new(0, 1, 0)).expect_err("must not be usable");
         assert!(err.to_string().contains("no signature"), "got: {err}");
     }

@@ -64,11 +64,17 @@ ureq = { version = "3.5.2", default-features = false, features = [
     "native-tls-no-default",
     "gzip",
 ] }
-# OpenPGP, in Rust, with no gpg binary required at runtime: the updater refuses
-# anything the release signing key did not sign, and that check has to work on
-# a machine with no GnuPG on it. Default features off - the defaults pull in
-# key *generation* and secret-key handling that a verifier has no use for.
-pgp = { version = "0.21.1", default-features = false }
+# Verifies the detached minisign signature on a download, and nothing else:
+# Ed25519 over a BLAKE2b hash, no key generation, no secret-key handling, no
+# other algorithm in the format. It has no dependencies of its own at all -
+# the whole crate is six files - which is why the updater adds no transitive
+# crates to the tree and `cargo deny check advisories` needs no exceptions.
+#
+# This replaced rpgp: OpenPGP is one format with many algorithms, so a verifier
+# that only ever wants Ed25519 still had to compile the RSA implementation and
+# carry its two open timing advisories. minisign has one algorithm, so the
+# narrowing is the format rather than a runtime check.
+minisign-verify = "0.3.0"
 # Replacing a running executable is three different problems on three
 # platforms (Windows will not let you unlink a running image). This is the
 # crate that already solved all three.

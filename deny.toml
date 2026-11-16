@@ -9,6 +9,11 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # Any unmaintained or yanked dependency is a release blocker, not a warning.
 yanked = "deny"
 unmaintained = "all"
+# Empty, and the point is to keep it that way: an ignore entry here is a
+# vulnerability this project has decided to ship with. The updater verifies
+# minisign signatures rather than OpenPGP ones partly for this reason - OpenPGP
+# meant compiling an RSA implementation, and carrying its two open timing
+# advisories, in order to check signatures that were never RSA.
 ignore = []
 
 [licenses]

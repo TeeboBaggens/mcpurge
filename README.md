@@ -98,25 +98,40 @@ mcpurge can replace itself with a newer release, under rules that match what it
 does to everything else: nothing happens without being asked, and nothing is
 accepted that cannot be verified.
 
-- **Signed, or not installed.** Every release binary carries a detached OpenPGP
-  signature made by the mcpurge release key, and the matching public key is
-  compiled into the binary rather than fetched. The signature is checked in
-  memory, before a byte is written anywhere executable. A download that does
-  not verify is discarded.
+- **Signed, or not installed.** Every release binary carries a detached
+  [minisign](https://jedisct1.github.io/minisign/) signature made by the
+  mcpurge release key, and the matching public key is compiled into the binary
+  rather than fetched. The signature is checked in memory, before a byte is
+  written anywhere executable. A download that does not verify is discarded.
 
   ```
-  Release signing key  E5FD 1E0C 7E53 CC18 15F4  3583 3BE1 0A2E F813 7679
-                       mcpurge release signing
+  Release signing key  RWS19zuWF/iFDqf71bMLPIPVNIR8XHNawsUJNNAN1nMJvFbC8ySb3LdI
+  Key ID               0E85F817963BF7B5
   ```
 
-  The same fingerprint is in **Help > About mcpurge**, in
-  `assets/release-signing-key.asc`, and in `SIGNING_KEY_FINGERPRINT` in
-  `src/update.rs`. Releases can be checked by hand with
-  `gpg --verify mcpurge-<target>.asc mcpurge-<target>`.
+  The same key ID is in **Help > About mcpurge**, in
+  `assets/release-signing-key.pub`, and in `SIGNING_KEY_ID` in `src/update.rs`.
+  Releases can be checked by hand without running mcpurge at all:
 
-- **Only Ed25519 is accepted.** The release key is an Ed25519 key, and the
-  verifier refuses any signature that is not, which keeps the OpenPGP library's
-  RSA code unreachable rather than merely unused.
+  ```sh
+  brew install minisign   # or: sudo apt install minisign
+  minisign -V -H -P RWS19zuWF/iFDqf71bMLPIPVNIR8XHNawsUJNNAN1nMJvFbC8ySb3LdI \
+           -m mcpurge-aarch64-apple-darwin
+  ```
+
+- **Ed25519, by format rather than by policy.** minisign has one algorithm, so
+  there is no field in a signature to talk the verifier down to something
+  weaker. This is why the updater brings in no cryptographic dependency tree
+  worth speaking of: `minisign-verify` has no dependencies at all, and
+  `cargo deny check advisories` passes with no exceptions. An earlier draft
+  used OpenPGP, which meant compiling an RSA implementation — and carrying its
+  two open timing advisories — to verify signatures that were never RSA.
+
+- **Three signatures are checked, not one.** The Ed25519 signature over the
+  download's BLAKE2b hash, a second one covering that signature together with
+  the release's trusted comment, and the key ID matching the built-in key. The
+  trusted comment names the version and file, so a valid signature cannot be
+  moved onto a different download.
 
 - **Checking is a toggle; installing never is.** **Help > Check for updates on
   launch** controls the one network request mcpurge makes. Turn it off and the
@@ -129,7 +144,9 @@ accepted that cannot be verified.
 
 Releases are built and signed by `.github/workflows/release.yml` on a `v*` tag,
 which refuses to publish if the tag and `Cargo.toml` disagree, and verifies each
-signature against the public key committed here before uploading anything.
+signature against the public key committed here — with the same `-H` the app
+insists on — before uploading anything. That verification step is where the
+committed public key and the signing key are proved to be a pair.
 
 ## Install
 
@@ -138,10 +155,14 @@ Download the binary for your platform from the
 check its signature, and put it somewhere on your `PATH`:
 
 ```sh
-gpg --import assets/release-signing-key.asc   # once
-gpg --verify mcpurge-aarch64-apple-darwin.asc mcpurge-aarch64-apple-darwin
+brew install minisign   # or: sudo apt install minisign
+minisign -V -H -P RWS19zuWF/iFDqf71bMLPIPVNIR8XHNawsUJNNAN1nMJvFbC8ySb3LdI \
+         -m mcpurge-aarch64-apple-darwin
 chmod +x mcpurge-aarch64-apple-darwin
 ```
+
+`-H` insists the signature is over a hash of the file rather than the file
+itself, which is the only form mcpurge's own verifier accepts.
 
 After that mcpurge keeps itself up to date — see [Updating itself](#updating-itself).
 
@@ -327,7 +348,7 @@ Critical fixes that ship without an advisory are caught separately by a daily
 ## Development
 
 ```sh
-cargo test --all                              # 124 tests
+cargo test --all                              # 127 tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 cargo deny check advisories licenses bans sources
