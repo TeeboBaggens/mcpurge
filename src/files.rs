@@ -423,8 +423,8 @@ mod tests {
 
     #[test]
     fn allow_path_arguments_are_never_deletable() {
-        // Regression: a real config on the development machine was
-        //   solidcraft-cli mcp --allow-path ~/development/projects/switch2coffee
+        // Regression: a real config read
+        //   solidcraft-cli mcp --allow-path ~/projects/a-firmware-project
         // and the scanner offered that 1.4 GB project directory for deletion.
         // A path handed to a server is the user's work, not server files.
         let project = std::env::temp_dir().join(format!("mcpurge-proj-{}", std::process::id()));

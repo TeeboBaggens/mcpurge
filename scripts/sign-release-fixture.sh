@@ -13,11 +13,25 @@
 #                                          minisign's pre-hashing-era format,
 #                                          which the verifier also refuses
 #
-# Needs the release secret key and its password, which live together in
-# ~/protondrive/_backups/minisign/. Nothing is written to ~/.minisign.
+# Needs the release secret key and its password, which live together in one
+# directory outside this repo, as:
+#
+#   mcpurge-release.key
+#   mcpurge-release-password.txt
+#
+# Point MCPURGE_RELEASE_KEY_DIR at that directory. There is deliberately no
+# default: where a signing key is kept is not this repo's business to publish,
+# and a wrong guess here would be a script that reads a key from somewhere
+# nobody intended. Nothing is written to ~/.minisign either.
 set -eu
 
-BACKUP="${MCPURGE_RELEASE_KEY_DIR:-$HOME/protondrive/_backups/minisign}"
+if [ -z "${MCPURGE_RELEASE_KEY_DIR:-}" ]; then
+    echo "set MCPURGE_RELEASE_KEY_DIR to the directory holding" >&2
+    echo "mcpurge-release.key and mcpurge-release-password.txt" >&2
+    exit 1
+fi
+
+BACKUP="$MCPURGE_RELEASE_KEY_DIR"
 SECRET="$BACKUP/mcpurge-release.key"
 PASSWORD_FILE="$BACKUP/mcpurge-release-password.txt"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
