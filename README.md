@@ -57,11 +57,11 @@ notice and respawn them), sends `SIGTERM` first, and escalates to `SIGKILL`
 only for survivors. On Windows, where there is no `SIGTERM`, it goes straight
 to the hard kill.
 
-**3. Not everything near a server is the server's.** SolidCraft's real config
-on the development machine was:
+**3. Not everything near a server is the server's.** A real SolidCraft config
+read:
 
 ```
-solidcraft-cli mcp --allow-path ~/development/projects/switch2coffee
+solidcraft-cli mcp --allow-path ~/projects/a-firmware-project
 ```
 
 An early build offered to delete that 1.4 GB path. It is a *project directory
