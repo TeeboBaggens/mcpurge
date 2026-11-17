@@ -1,6 +1,6 @@
 [package]
 name = "mcpurge"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.99"
 description = "Find, inspect, stop and purge MCP servers across every AI agent on this machine"
