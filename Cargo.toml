@@ -41,8 +41,13 @@ sysinfo = "0.40.3"
 dirs = "7.0.0"
 walkdir = "2.5.0"
 glob = "0.3.4"      # expands registry path patterns like globalStorage/*/settings/*.json
-trash = "5.3.0"
-jiff = "0.2.43"
+# 5.4.0 (2026-11-17) is the first release that keeps chrono out of the tree:
+# the freedesktop implementation now reads trashinfo timestamps with jiff, so
+# RUSTSEC-2026-0543 (chrono unmaintained) no longer reaches us transitively.
+trash = "5.4.0"
+# Matches the major trash now depends on, so Linux builds carry one jiff, not
+# two. Latest stable, verified against the crates.io API on 2026-11-17.
+jiff = "1.0.0"
 open = "5.4.5"
 
 # Errors.

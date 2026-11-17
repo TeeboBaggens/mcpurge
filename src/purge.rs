@@ -31,7 +31,9 @@ pub fn backups_root() -> PathBuf {
 }
 
 fn timestamp() -> String {
-    jiff::Zoned::now().strftime("%Y-%m-%dT%H-%M-%S").to_string()
+    jiff::ZonedDateTime::now()
+        .strftime("%Y-%m-%dT%H-%M-%S")
+        .to_string()
 }
 
 /// What a purge should do.
