@@ -65,6 +65,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>io.github.teebobaggens.mcpurge</string>
     <key>CFBundleExecutable</key>
     <string>mcpurge</string>
+    <key>CFBundleIconFile</key>
+    <string>mcpurge</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleInfoDictionaryVersion</key>
@@ -90,6 +92,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+# Built from assets/icon.svg rather than committed, so the icon in the Dock is
+# always the icon in the repo. CFBundleIconFile names it without the extension,
+# which is the spelling Launch Services expects.
+"$ROOT/scripts/make-icon.sh" "$APP/Contents/Resources"
 
 # Classic-era file, still read by Launch Services, and cheap to be right about.
 printf 'APPL????' > "$APP/Contents/PkgInfo"

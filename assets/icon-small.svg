@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<!--
+  The small-size mcpurge icon, for the 16 and 32 point slots.
+
+  Same gesture as icon.svg, with less in it: at 32px three nested strokes and
+  three fading dots turn into a smudge, so the ribbon keeps two passes and the
+  purge keeps two dots, both drawn heavier. Edit the two files together - they
+  are meant to read as one icon at different distances.
+-->
+  <defs>
+    <linearGradient id="bark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3F3832"/><stop offset="1" stop-color="#262220"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185.4" ry="185.4" fill="url(#bark)"/>
+  <path d="M 237.2 513.5 L 515.1 235.6 A 130.0 130.0 0 0 1 699.0 419.5 L 421.1 697.4" fill="none" stroke="#EAE2D8" stroke-width="127.1" stroke-linecap="round"/>
+  <circle cx="699.0" cy="787.3" r="64.7" fill="#EAE2D8" opacity="0.85"/>
+  <circle cx="813.4" cy="672.8" r="37.0" fill="#EAE2D8" opacity="0.5"/>
+</svg>

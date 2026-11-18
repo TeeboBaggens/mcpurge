@@ -238,6 +238,31 @@ sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev \
 `libssl-dev` is there for the updater: it uses the platform's own TLS rather
 than bundling a copy of Mozilla's root store, so on Linux that means OpenSSL.
 
+To build the Mac app rather than the bare binary — the same thing the release
+workflow does, and it needs nothing installed beyond Xcode's command line
+tools:
+
+```sh
+cargo build --release --target aarch64-apple-darwin --target x86_64-apple-darwin
+scripts/make-macos-app.sh \
+  target/aarch64-apple-darwin/release/mcpurge \
+  target/x86_64-apple-darwin/release/mcpurge dist
+```
+
+### The icon
+
+`assets/icon.svg` is the MCP ribbon coming apart into dots: the Model Context
+Protocol mark is a folded ribbon of nested diagonal strokes, and here its third
+pass dissolves as it travels. It is drawn in the bark and parchment from
+`src/theme.rs`, so the icon and the app are the same two taupes.
+
+`assets/icon-small.svg` is the same gesture with less in it, for the 16 and 32
+point slots where the full mark closes up into a smudge. `scripts/make-icon.sh`
+renders both into `mcpurge.icns` with `sips` and `iconutil` — neither needs
+installing — and `--window` rewrites `assets/icon-window.png`, the PNG the GUI
+embeds for its Linux and Windows title bars. Edit the SVGs; nothing else is
+hand-maintained.
+
 ## Usage
 
 Launch with no arguments for the GUI. The engine is also usable headlessly,

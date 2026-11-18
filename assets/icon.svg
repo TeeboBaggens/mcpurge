@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<!--
+  mcpurge's icon: the MCP ribbon being purged.
+
+  The Model Context Protocol mark is a folded ribbon of nested diagonal
+  strokes. Here it is drawn in mcpurge's own taupe - the bark and parchment
+  from src/theme.rs, so the icon and the app are the same two colours - and
+  the ribbon's third pass is coming apart into dots that shrink and fade as
+  they go. That is the whole program in one gesture: an MCP server being
+  taken off the machine.
+
+  This is the artwork for 128px and up. Below that the strokes blur into each
+  other, so icon-small.svg carries a simplified mark for the 16 and 32 slots,
+  which is what scripts/make-icon.sh builds the .icns from.
+-->
+  <defs>
+    <linearGradient id="bark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3F3832"/><stop offset="1" stop-color="#262220"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185.4" ry="185.4" fill="url(#bark)"/>
+  <path d="M 253.7 528.2 L 548.3 233.7 A 92.7 92.7 0 0 1 679.3 364.7 L 384.8 659.3" fill="none" stroke="#EAE2D8" stroke-width="83.3" stroke-linecap="round"/>
+  <path d="M 515.9 790.3 L 610.1 696.1" fill="none" stroke="#EAE2D8" stroke-width="83.3" stroke-linecap="round"/>
+  <circle cx="674.9" cy="631.3" r="41.7" fill="#EAE2D8" opacity="0.75"/>
+  <circle cx="739.7" cy="566.5" r="29.2" fill="#EAE2D8" opacity="0.5"/>
+  <circle cx="794.2" cy="512.0" r="17.7" fill="#EAE2D8" opacity="0.3"/>
+</svg>

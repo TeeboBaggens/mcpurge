@@ -155,6 +155,7 @@ jobs:
           set -eu
           ditto -x -k dist/mcpurge-macos-universal.app.zip check/
           test -x check/mcpurge.app/Contents/MacOS/mcpurge
+          test -f check/mcpurge.app/Contents/Resources/mcpurge.icns
           lipo -archs check/mcpurge.app/Contents/MacOS/mcpurge | tee archs
           grep -q arm64 archs && grep -q x86_64 archs
           codesign --verify --deep --strict check/mcpurge.app
