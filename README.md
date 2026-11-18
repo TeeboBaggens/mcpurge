@@ -138,6 +138,14 @@ accepted that cannot be verified.
   app talks to nothing at all unless you pick **Check for updates…** yourself.
   Finding a release only opens a window that names the version and asks.
 
+- **Inside `mcpurge.app` it updates the binary, not the bundle.** An update
+  replaces `mcpurge.app/Contents/MacOS/mcpurge` with the signed per-architecture
+  download, which keeps working - the replacement carries its own ad-hoc
+  signature, which is what macOS enforces at launch - but it does leave the
+  bundle's own seal stale, so `codesign --verify mcpurge.app` will complain
+  afterwards and the binary is no longer universal. Re-download the zip if you
+  want either of those back.
+
 - **It will not overwrite a build.** Running from `target/release` during
   development is normal; replacing that binary would clobber your build output,
   so an install from a cargo target directory is declined with an explanation.
@@ -150,19 +158,62 @@ committed public key and the signing key are proved to be a pair.
 
 ## Install
 
-Download the binary for your platform from the
-[latest release](https://github.com/TeeboBaggens/mcpurge/releases/latest),
-check its signature, and put it somewhere on your `PATH`:
+Everything on the [latest release](https://github.com/TeeboBaggens/mcpurge/releases/latest)
+ships with a detached minisign signature beside it, and `-H` below insists the
+signature is over a hash of the file rather than the file itself, which is the
+only form mcpurge's own verifier accepts:
 
 ```sh
 brew install minisign   # or: sudo apt install minisign
-minisign -V -H -P RWS19zuWF/iFDqf71bMLPIPVNIR8XHNawsUJNNAN1nMJvFbC8ySb3LdI \
-         -m mcpurge-aarch64-apple-darwin
-chmod +x mcpurge-aarch64-apple-darwin
 ```
 
-`-H` insists the signature is over a hash of the file rather than the file
-itself, which is the only form mcpurge's own verifier accepts.
+### macOS
+
+Download **`mcpurge-macos-universal.app.zip`** — one app that runs on both
+Apple Silicon and Intel. Verify it, unzip it, and drag `mcpurge.app` to
+Applications:
+
+```sh
+minisign -V -H -P RWS19zuWF/iFDqf71bMLPIPVNIR8XHNawsUJNNAN1nMJvFbC8ySb3LdI \
+         -m mcpurge-macos-universal.app.zip
+ditto -x -k mcpurge-macos-universal.app.zip .
+xattr -dr com.apple.quarantine mcpurge.app
+```
+
+That last line is the one to understand rather than paste. mcpurge is signed
+with its own release key, not with an Apple Developer ID, and it is not
+notarized — so macOS marks the download as quarantined and refuses to open it,
+with a dialog that offers only *Done* or *Move to Trash*. Clearing the
+quarantine flag is how you say you have checked it yourself, which the
+`minisign` line above is you doing exactly that: a signature made by the key in
+`assets/release-signing-key.pub` is a stronger statement about where the file
+came from than notarization is.
+
+If you would rather not touch `xattr`, open it once and macOS will refuse, then
+go to **System Settings > Privacy & Security**, where an **Open Anyway** button
+appears for about an hour after that refusal. Control-clicking the app and
+choosing *Open* no longer works; Apple removed that route in macOS 15.
+
+The bare `mcpurge-aarch64-apple-darwin` and `mcpurge-x86_64-apple-darwin`
+binaries are still published, and are the ones to put on a `PATH` if you want
+`mcpurge --list` and `mcpurge --json` in a shell or a script. The `.app` is the
+same program; the bundle is what gives it a Dock icon, an application menu, and
+privacy prompts that name mcpurge instead of your terminal.
+
+### Linux and Windows
+
+Download the binary for your platform, check its signature, and put it
+somewhere on your `PATH`:
+
+```sh
+minisign -V -H -P RWS19zuWF/iFDqf71bMLPIPVNIR8XHNawsUJNNAN1nMJvFbC8ySb3LdI \
+         -m mcpurge-x86_64-unknown-linux-gnu
+chmod +x mcpurge-x86_64-unknown-linux-gnu
+```
+
+On Windows the download is `mcpurge-x86_64-pc-windows-msvc.exe`, which needs no
+`chmod`. It is not signed with an Authenticode certificate either, so SmartScreen
+will ask once.
 
 After that mcpurge keeps itself up to date — see [Updating itself](#updating-itself).
 

@@ -1,5 +1,6 @@
-# Cut a release: build the binaries, sign them with the mcpurge release key,
-# and publish both to a GitHub release.
+# Cut a release: build the binaries, bundle the two macOS ones into a
+# double-clickable mcpurge.app, sign everything with the mcpurge release key,
+# and publish it all to a GitHub release.
 #
 # The self-updater in src/update.rs will install nothing that this workflow did
 # not sign, so the signing step is not decoration: a release published without
@@ -113,9 +114,68 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # A bare Mach-O executable is not a Mac application. Downloaded from a release
+  # it has no execute bit - an HTTP download carries no POSIX mode - so Finder
+  # opens nothing at all when it is double-clicked, which is how 0.1.1 shipped.
+  # The two binaries above stay in the release: the self-updater asks for them
+  # by exact name, and they are what belongs on a PATH for --list and --json.
+  # This job turns them into the thing a Mac user actually downloads.
+  #
+  # It has to run on macOS: lipo and codesign are both Xcode tooling, and the
+  # ad-hoc signature is not decoration - unsigned arm64 code will not load.
+  bundle-macos:
+    name: bundle mcpurge.app
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: mcpurge-*-apple-darwin
+          path: darwin
+          merge-multiple: true
+
+      - name: Build the universal app bundle
+        run: |
+          set -eu
+          mkdir -p dist
+          chmod +x darwin/mcpurge-aarch64-apple-darwin darwin/mcpurge-x86_64-apple-darwin
+          scripts/make-macos-app.sh \
+            darwin/mcpurge-aarch64-apple-darwin \
+            darwin/mcpurge-x86_64-apple-darwin \
+            dist
+
+      # The bug this job fixes was a download that would not run, so the zip is
+      # unpacked and run here rather than taken on trust. ditto is used to
+      # unpack for the same reason it is used to pack: anything else drops the
+      # execute bit, and then this step would be testing something no user gets.
+      - name: Run the app out of the zip
+        run: |
+          set -eu
+          ditto -x -k dist/mcpurge-macos-universal.app.zip check/
+          test -x check/mcpurge.app/Contents/MacOS/mcpurge
+          lipo -archs check/mcpurge.app/Contents/MacOS/mcpurge | tee archs
+          grep -q arm64 archs && grep -q x86_64 archs
+          codesign --verify --deep --strict check/mcpurge.app
+          got=$(check/mcpurge.app/Contents/MacOS/mcpurge --version)
+          want="mcpurge ${GITHUB_REF_NAME#v}"
+          echo "ran: $got"
+          if [ "$got" != "$want" ]; then
+            echo "::error::the bundled app reports '$got', expected '$want'"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mcpurge-macos-universal-app
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
   publish:
     name: sign and publish
-    needs: build
+    needs: [build, bundle-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
