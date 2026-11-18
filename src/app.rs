@@ -29,11 +29,23 @@ use crate::update;
 
 /// Launch the GUI.
 pub fn run() -> anyhow::Result<()> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1280.0, 800.0])
+        .with_min_inner_size([920.0, 520.0])
+        .with_title("mcpurge");
+
+    // The title bar and task switcher on Linux and Windows. macOS ignores this
+    // and reads mcpurge.app/Contents/Resources/mcpurge.icns instead, which
+    // scripts/make-icon.sh renders from the same assets/icon.svg. A window
+    // that cannot decode its own icon is still a working window, so a failure
+    // here is dropped rather than turned into a startup error.
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-window.png"))
+    {
+        viewport = viewport.with_icon(icon);
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([920.0, 520.0])
-            .with_title("mcpurge"),
+        viewport,
         ..Default::default()
     };
 
