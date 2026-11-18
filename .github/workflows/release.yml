@@ -167,10 +167,14 @@ jobs:
             exit 1
           fi
 
+      # The zip only. dist/ also holds the mcpurge.app tree the zip was made
+      # from, and an artifact carrying that directory is what broke the v0.1.2
+      # publish: `gh release create dist/*` reached the restored mcpurge.app
+      # and stopped at "is a directory".
       - uses: actions/upload-artifact@v7
         with:
           name: mcpurge-macos-universal-app
-          path: dist/*
+          path: dist/mcpurge-macos-universal.app.zip
           if-no-files-found: error
           retention-days: 1
 
@@ -252,15 +256,27 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
+          # dist/mcpurge-* rather than dist/*, which is the same glob the
+          # signing loop above uses: an asset that is not named like a release
+          # asset is not one, and handing the uploader anything else - a stray
+          # directory, a leftover file - is how this step failed before. Say so
+          # here rather than let the uploader report it halfway through.
+          for file in dist/mcpurge-*; do
+            if [ ! -f "$file" ]; then
+              echo "::error::$file is not a file, so it cannot be a release asset"
+              exit 1
+            fi
+          done
+
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             echo "release $GITHUB_REF_NAME exists; uploading the signed binaries into it"
-            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            gh release upload "$GITHUB_REF_NAME" dist/mcpurge-* --clobber
           else
             gh release create "$GITHUB_REF_NAME" \
               --title "mcpurge ${GITHUB_REF_NAME#v}" \
               --generate-notes \
               --verify-tag \
-              dist/*
+              dist/mcpurge-*
           fi
 
           # Whichever path ran, the release is only a release if the signatures
